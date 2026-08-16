@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("USPS_DISABLE_AUTO_RESTORE", "1")
@@ -331,7 +332,7 @@ def test_proxy_table_accepts_txt_file_urls(tmp_path):
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(path))])
 
-    assert window.table._first_proxy_path(mime) == str(path)
+    assert Path(window.table._first_proxy_path(mime)) == path
     window.close()
 
 
