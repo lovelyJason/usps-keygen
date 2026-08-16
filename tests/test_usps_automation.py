@@ -494,6 +494,9 @@ def test_business_address_outage_retries_then_uses_original_address(monkeypatch)
         def click(self):
             self.page.clicks += 1
 
+        def all(self):
+            return []
+
     class Page:
         def __init__(self):
             self.clicks = 0
@@ -530,4 +533,73 @@ def test_business_address_outage_retries_then_uses_original_address(monkeypatch)
     assert page.clicks == 2
     assert page.waits == [2_000]
     assert page.fallback is True
-    assert logs[-1] == "USPS 地址服务故障，已按原地址继续"
+    assert logs[-1] == "USPS 地址验证链路不可用，已按原地址继续"
+
+
+def test_business_address_200_without_page_progress_uses_original_address(monkeypatch):
+    class Response:
+        status = 200
+        url = "https://reg.usps.com/entreg/json/ValidateAddressAction"
+        headers = {}
+
+    class ResponseInfo:
+        value = Response()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Locator:
+        def __init__(self, page):
+            self.page = page
+
+        def click(self):
+            self.page.clicks += 1
+
+        def is_visible(self):
+            return False
+
+        def all(self):
+            return []
+
+    class Page:
+        def __init__(self):
+            self.clicks = 0
+            self.waits = []
+            self.fallback = False
+
+        def locator(self, _selector):
+            return Locator(self)
+
+        def wait_for_function(self, script, **_kwargs):
+            if "jQuery._data" in script:
+                return None
+            raise RuntimeError("address page did not advance")
+
+        def expect_response(self, _predicate, timeout):
+            assert timeout == 30_000
+            return ResponseInfo()
+
+        def evaluate(self, _script):
+            return None
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    runner = UspsRegistrationRunner(AutomationConfig())
+    page = Page()
+    logs = []
+    monkeypatch.setattr(
+        runner,
+        "_accept_unverified_business_address",
+        lambda current_page: setattr(current_page, "fallback", True),
+    )
+
+    runner._start_business_address_search(page, Event(), logs.append)
+
+    assert page.clicks == 2
+    assert page.waits == [2_000]
+    assert page.fallback is True
+    assert logs[-1] == "USPS 地址验证链路不可用，已按原地址继续"

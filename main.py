@@ -262,9 +262,12 @@ class MainWindow(QMainWindow):
             return
         if not indices or self.worker:
             return
+        self._set_running(True)
+        QApplication.processEvents()
         try:
             self._mailbox_client().verify_access()
         except Exception as exc:
+            self._set_running(False)
             QMessageBox.warning(self, "邮箱预检失败", str(exc))
             return
         for index, email in rotate_manual_retry_addresses(self.rows, self.results, indices):
@@ -291,7 +294,6 @@ class MainWindow(QMainWindow):
         self.worker.row_email_changed.connect(self.on_row_email_changed)
         self.worker.log.connect(self.log_view.append)
         self.worker.finished.connect(self.on_batch_finished)
-        self._set_running(True)
         self.worker.start()
 
     def stop_batch(self) -> None:

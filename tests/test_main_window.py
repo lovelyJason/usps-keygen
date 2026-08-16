@@ -81,6 +81,33 @@ def test_start_preflights_authenticated_mailbox_access(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
     window._start_indices([0])
     assert verified == [True]
+    assert not window.start_button.isEnabled()
+    assert window.stop_button.isEnabled()
+    window.on_batch_finished()
+    assert window.start_button.isEnabled()
+    assert not window.stop_button.isEnabled()
+    window.close()
+
+
+def test_failed_startup_restores_start_button(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="user", email="a@b.com")]
+    window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window._set_running(False)
+
+    class Mailbox:
+        def verify_access(self):
+            raise RuntimeError("offline")
+
+    monkeypatch.setattr(window, "_mailbox_client", lambda: Mailbox())
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args, **_kwargs: None)
+
+    window._start_indices([0])
+
+    assert window.start_button.isEnabled()
+    assert not window.stop_button.isEnabled()
+    assert window.worker is None
     window.close()
 
 

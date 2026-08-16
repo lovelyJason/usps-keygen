@@ -345,17 +345,40 @@ class UspsRegistrationRunner:
                     raise RegistrationFlowError("address_verification", detail) from None
                 response = None
 
-            if response is not None and not self._address_service_outage(response):
+            if response is not None and not self._address_service_outage(response) and (
+                self._wait_for_address_progress(page)
+            ):
                 return
+            detail = visible_errors(page)
+            if detail:
+                raise RegistrationFlowError("address_verification", detail)
             if attempt == 0:
-                reporter("地址服务暂时无响应，2 秒后自动重试")
+                reporter("地址验证链路未完成，2 秒后自动重试")
                 self._reset_address_search(page)
                 page.wait_for_timeout(2_000)
                 continue
 
-            reporter("USPS 地址服务故障，已按原地址继续")
+            reporter("USPS 地址验证链路不可用，已按原地址继续")
             self._accept_unverified_business_address(page)
             return
+
+    def _wait_for_address_progress(self, page) -> bool:
+        try:
+            page.wait_for_function(
+                "() => [2,3,4,5,6].some(step => "
+                "document.querySelector('#addressHolderStep' + step)?.offsetParent !== null)",
+                timeout=min(self.config.page_timeout_ms, 15_000),
+            )
+        except Exception:
+            return self._address_progress_visible(page)
+        return True
+
+    @staticmethod
+    def _address_progress_visible(page) -> bool:
+        return any(
+            page.locator(f"#addressHolderStep{step}").is_visible()
+            for step in range(2, 7)
+        )
 
     @staticmethod
     def _address_service_outage(response) -> bool:
