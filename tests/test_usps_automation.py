@@ -415,3 +415,52 @@ def test_browser_failure_after_final_submit_keeps_unknown_stage(monkeypatch):
         runner._complete_account_submission(FakePage(), data, Mailbox(), Event())
 
     assert runner.stage == "submission_unknown"
+
+
+def test_business_address_confirmation_survives_wizard_page_transition():
+    class AddressLocator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            return 0 if self.selector == "input[name='address']:visible" else 1
+
+        def is_visible(self):
+            if self.selector == "#tfName":
+                return self.page.phase == "identity"
+            if self.selector in ("#addressHolderStep6", "#confirmed-address"):
+                return self.page.phase == "confirmed"
+            if self.selector == "#btn-address-wizard-continue":
+                return self.page.phase == "confirmed"
+            return self.selector == "#a-address-step1"
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            self.page.clicks.append(self.selector)
+            if self.selector == "#a-address-step1":
+                self.page.phase = "confirmed"
+            elif self.selector == "#btn-address-wizard-continue":
+                self.page.phase = "identity"
+
+    class AddressPage:
+        def __init__(self):
+            self.phase = "input"
+            self.clicks = []
+
+        def locator(self, selector):
+            return AddressLocator(self, selector)
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = AddressPage()
+    runner = UspsRegistrationRunner(AutomationConfig())
+
+    runner._complete_address_wizard(page, "#tfName", Event())
+
+    assert page.phase == "identity"
+    assert page.clicks == ["#a-address-step1", "#btn-address-wizard-continue"]

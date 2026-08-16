@@ -288,8 +288,10 @@ class UspsRegistrationRunner:
             "#btn-address-wizard-continue",
             "#btn-address-wizard-continue-three",
         ]
+        address_confirmed = False
         for _ in range(8):
-            if page.locator(target_selector).is_visible() and self._address_finalized(page):
+            address_confirmed = address_confirmed or self._address_finalized(page)
+            if page.locator(target_selector).is_visible() and address_confirmed:
                 return
             self._check_stop(stop_event)
             visible_address = page.locator("input[name='address']:visible").first
