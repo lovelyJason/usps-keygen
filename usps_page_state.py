@@ -9,6 +9,7 @@ class PageState(Enum):
     WAITING_FOR_EMAIL = "waiting_for_email"
     CAPTCHA_REQUIRED = "captcha_required"
     IDENTITY_REJECTED = "identity_rejected"
+    SERVICE_TIMEOUT = "service_timeout"
     SUCCESS = "success"
     UNKNOWN = "unknown"
 
@@ -47,6 +48,8 @@ SUCCESS_TITLES = (
 
 def classify_page(url: str, title: str, body_text: str, primary_heading: str = "") -> PageState:
     combined = f"{url}\n{title}\n{body_text}".casefold()
+    if "request timed out" in combined and "account could not be created" in combined:
+        return PageState.SERVICE_TIMEOUT
     if "registrationgatewayfailure" in combined or (
         "business account could not be created" in combined
     ):

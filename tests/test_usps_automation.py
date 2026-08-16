@@ -27,6 +27,16 @@ def test_classify_email_link_wait_page():
     assert state is PageState.WAITING_FOR_EMAIL
 
 
+def test_classify_explicit_usps_request_timeout():
+    state = classify_page(
+        "https://reg.usps.com/gateway/complete",
+        "USPS.com Registration",
+        "Request Timed Out\nWe're sorry, the request timed out and your account "
+        "could not be created at this time. Please try completing the form again later.",
+    )
+    assert state is PageState.SERVICE_TIMEOUT
+
+
 def test_classify_success_page():
     state = classify_page(
         "https://reg.usps.com/success",

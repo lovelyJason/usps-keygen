@@ -10,6 +10,7 @@ RETRYABLE_STAGES = {
     "email_request",
     "mail",
     "network",
+    "usps_service_timeout",
 }
 
 

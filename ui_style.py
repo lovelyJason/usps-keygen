@@ -19,6 +19,9 @@ QPushButton#primaryButton {
     color: white; background: #1976a3;
     border-color: #125d80; font-weight: 600;
 }
+QPushButton#primaryButton:disabled {
+    color: #8a939b; background: #dfe3e6; border-color: #c8ced3;
+}
 QPushButton:disabled {
     color: #8a939b; background: #eceff1; border-color: #c8ced3;
 }

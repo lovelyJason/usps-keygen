@@ -225,6 +225,10 @@ class UspsRegistrationRunner:
         state = self._wait_for_terminal(page, stop_event)
         if state is PageState.SUCCESS:
             self.stage = "complete"
+        if state is PageState.SERVICE_TIMEOUT:
+            raise RegistrationFlowError(
+                "usps_service_timeout", "USPS 创建账号请求超时，官方已确认账号未创建"
+            )
         if state is PageState.WAITING_FOR_EMAIL or visible_otp_input(page):
             self.stage = "post_submit_mail"
             verification = mailbox.poll_verification(
@@ -607,6 +611,12 @@ class UspsRegistrationRunner:
         if state is PageState.IDENTITY_REJECTED:
             return RegistrationResult.failed(
                 "identity_verification", "USPS 身份校验未通过", page.url
+            )
+        if state is PageState.SERVICE_TIMEOUT:
+            return RegistrationResult.failed(
+                "usps_service_timeout",
+                "USPS 创建账号请求超时，官方已确认账号未创建",
+                page.url,
             )
         return RegistrationResult.failed(
             stage, visible_errors(page) or "未检测到 USPS 注册成功页面", page.url
