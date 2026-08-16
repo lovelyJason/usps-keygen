@@ -1,0 +1,10 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+build/
+dist/
+run-artifacts/
+*.spec.bak
+.DS_Store

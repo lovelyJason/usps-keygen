@@ -1,0 +1,22 @@
+[project]
+name = "usps-registration-mvp"
+version = "2.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=42,<47",
+    "playwright>=1.45,<2",
+    "pyside6>=6.7,<7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.12,<1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,89 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest ruff pyinstaller
+
+      - name: Run quality checks
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m ruff check .
+          python -m pytest -q
+
+      - name: Install bundled Chromium
+        shell: pwsh
+        run: |
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PWD ".playwright-browsers"
+          python -m playwright install chromium
+
+      - name: Build application
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean usps-keygen.spec
+          Copy-Item -Recurse -Force ".playwright-browsers" "dist\USPSBatchRegistration\playwright-browsers"
+          Copy-Item -Force "README.md" "dist\USPSBatchRegistration\README.md"
+          Copy-Item -Force "registrations_template.csv" "dist\USPSBatchRegistration\registrations_template.csv"
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          $exe = "dist\USPSBatchRegistration\USPSBatchRegistration.exe"
+          if (-not (Test-Path $exe)) { throw "Executable was not created" }
+          if ((Get-Item $exe).Length -lt 1MB) { throw "Executable is unexpectedly small" }
+          if (-not (Test-Path "dist\USPSBatchRegistration\playwright-browsers")) {
+            throw "Bundled Chromium is missing"
+          }
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\USPSBatchRegistration" -DestinationPath "dist\USPSBatchRegistration-Windows-x64.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: USPSBatchRegistration-Windows-x64
+          path: dist/USPSBatchRegistration-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/USPSBatchRegistration-Windows-x64.zip
+          generate_release_notes: true
