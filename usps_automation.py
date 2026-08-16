@@ -163,7 +163,7 @@ class UspsRegistrationRunner:
 
         self.stage = "address_verification"
         self._fill_address(page, data)
-        self._complete_address_wizard(page, "#tfName", stop_event)
+        self._complete_address_wizard(page, "#tfName", stop_event, log)
         self.stage = "identity_verification"
         fill_with_events(page, "#tfName", data.first_name)
         fill_with_events(page, "#tlName", data.last_name)
@@ -206,7 +206,7 @@ class UspsRegistrationRunner:
         fill_with_events(page, "#temailRetype", data.email)
         self._fill_address(page, data)
         self.stage = "address_verification"
-        self._complete_address_wizard(page, "#btn-submit", stop_event)
+        self._complete_address_wizard(page, "#btn-submit", stop_event, log)
         return self._complete_account_submission(page, data, mailbox, stop_event)
 
     def _complete_account_submission(
@@ -275,10 +275,17 @@ class UspsRegistrationRunner:
         fill_with_events(page, "#tzip", data.zip_code)
 
     def _complete_address_wizard(
-        self, page, target_selector: str, stop_event: Event | None
+        self,
+        page,
+        target_selector: str,
+        stop_event: Event | None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self._check_stop(stop_event)
-        page.locator("#a-address-step1").click()
+        if target_selector == "#tfName":
+            self._start_business_address_search(page, stop_event, log)
+        else:
+            page.locator("#a-address-step1").click()
         page.wait_for_timeout(700)
         actions = [
             "#a-address-step2",
@@ -309,6 +316,96 @@ class UspsRegistrationRunner:
                 break
         raise RegistrationFlowError(
             "address_verification", visible_errors(page) or "地址确认未完成"
+        )
+
+    def _start_business_address_search(
+        self,
+        page,
+        stop_event: Event | None,
+        log: Callable[[str], None] | None,
+    ) -> None:
+        reporter = log or (lambda _message: None)
+        search = page.locator("#a-address-step1")
+        page.wait_for_function(
+            "() => !!window.jQuery && "
+            "!!jQuery._data(document.querySelector('#a-address-step1'), 'events')?.click"
+        )
+        for attempt in range(2):
+            self._check_stop(stop_event)
+            try:
+                with page.expect_response(
+                    lambda response: "ValidateAddressAction" in response.url,
+                    timeout=min(self.config.page_timeout_ms, 30_000),
+                ) as response_info:
+                    search.click()
+                response = response_info.value
+            except Exception:
+                detail = visible_errors(page)
+                if detail:
+                    raise RegistrationFlowError("address_verification", detail) from None
+                response = None
+
+            if response is not None and not self._address_service_outage(response):
+                return
+            if attempt == 0:
+                reporter("地址服务暂时无响应，2 秒后自动重试")
+                self._reset_address_search(page)
+                page.wait_for_timeout(2_000)
+                continue
+
+            reporter("USPS 地址服务故障，已按原地址继续")
+            self._accept_unverified_business_address(page)
+            return
+
+    @staticmethod
+    def _address_service_outage(response) -> bool:
+        location = response.headers.get("location", "").casefold()
+        return (
+            300 <= response.status < 400
+            and "anyapp_outage_apology" in location
+        ) or "anyapp_outage_apology" in response.url.casefold()
+
+    @staticmethod
+    def _reset_address_search(page) -> None:
+        page.evaluate(
+            "() => { "
+            "window.jQuery?.unblockUI?.(); "
+            "document.querySelector('#a-address-step1')?.classList.remove('disabled'); "
+            "}"
+        )
+
+    @staticmethod
+    def _accept_unverified_business_address(page) -> None:
+        page.evaluate(
+            "() => { "
+            "const get = id => document.querySelector(id)?.value?.trim() || ''; "
+            "const text = (selector, value) => { "
+            "const element = document.querySelector(selector); "
+            "if (element) element.textContent = value; "
+            "}; "
+            "const ams = document.querySelector('#ams-verified'); "
+            "const completed = document.querySelector('#address-c'); "
+            "if (ams) ams.value = 'false'; if (completed) completed.value = 'true'; "
+            "text('#final-address .company', get('#tcompany')); "
+            "text('#final-address .address1', get('#taddress')); "
+            "text('#final-address .address2', get('#tapt')); "
+            "text('#final-address .city', get('#tcity')); "
+            "text('#final-address .state', get('#sstate')); "
+            "text('#final-address .zip', get('#tzip')); "
+            "document.querySelector('#confirmed-address')?.classList.add('d-none'); "
+            "document.querySelector('#unconfirmed-address')?.classList.remove('d-none'); "
+            "document.querySelectorAll('div.confirmed-address').forEach(" 
+            "element => element.classList.add('d-none')); "
+            "document.querySelectorAll('div.unconfirmed-address').forEach(" 
+            "element => element.classList.remove('d-none')); "
+            "document.querySelector('#btn-address-wizard-continue-two')?.classList.add('d-none'); "
+            "document.querySelector('#btn-address-wizard-continue-three')?.classList.remove(" 
+            "'d-none'); "
+            "document.querySelector('#addressHolderStep1')?.classList.add('d-none'); "
+            "document.querySelector('#addressHolderStep6')?.classList.remove('d-none'); "
+            "window.jQuery?.unblockUI?.(); "
+            "document.querySelector('#a-address-step1')?.classList.remove('disabled'); "
+            "}"
         )
 
     @staticmethod

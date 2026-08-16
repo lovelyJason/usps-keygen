@@ -459,8 +459,75 @@ def test_business_address_confirmation_survives_wizard_page_transition():
 
     page = AddressPage()
     runner = UspsRegistrationRunner(AutomationConfig())
+    runner._start_business_address_search = (
+        lambda current_page, _stop, _log: current_page.locator("#a-address-step1").click()
+    )
 
     runner._complete_address_wizard(page, "#tfName", Event())
 
     assert page.phase == "identity"
     assert page.clicks == ["#a-address-step1", "#btn-address-wizard-continue"]
+
+
+def test_business_address_outage_retries_then_uses_original_address(monkeypatch):
+    class Response:
+        status = 302
+        url = "https://reg.usps.com/entreg/json/ValidateAddressAction"
+        headers = {
+            "location": "https://www.usps.com/root/global/server_responses/"
+            "anyapp_outage_apology.htm"
+        }
+
+    class ResponseInfo:
+        value = Response()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Search:
+        def __init__(self, page):
+            self.page = page
+
+        def click(self):
+            self.page.clicks += 1
+
+    class Page:
+        def __init__(self):
+            self.clicks = 0
+            self.waits = []
+            self.fallback = False
+
+        def locator(self, _selector):
+            return Search(self)
+
+        def wait_for_function(self, _script):
+            return None
+
+        def expect_response(self, _predicate, timeout):
+            assert timeout == 30_000
+            return ResponseInfo()
+
+        def evaluate(self, _script):
+            return None
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    runner = UspsRegistrationRunner(AutomationConfig())
+    page = Page()
+    logs = []
+    monkeypatch.setattr(
+        runner,
+        "_accept_unverified_business_address",
+        lambda current_page: setattr(current_page, "fallback", True),
+    )
+
+    runner._start_business_address_search(page, Event(), logs.append)
+
+    assert page.clicks == 2
+    assert page.waits == [2_000]
+    assert page.fallback is True
+    assert logs[-1] == "USPS 地址服务故障，已按原地址继续"
