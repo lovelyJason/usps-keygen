@@ -1,3 +1,5 @@
+import os
+
 import checkpoint
 from checkpoint import checkpoint_has_unfinished, load_checkpoint, save_checkpoint
 from models import RegistrationData, RegistrationResult
@@ -21,11 +23,13 @@ def test_checkpoint_round_trip_preserves_generated_email_and_result(tmp_path):
 
     assert loaded_rows == rows
     assert loaded_results == results
-    assert path.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
     raw = path.read_text(encoding="utf-8")
     assert "SensitivePass123" not in raw
     assert "AnswerOne" not in raw
-    assert path.with_suffix(".key").stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert path.with_suffix(".key").stat().st_mode & 0o077 == 0
 
 
 def test_checkpoint_reports_unfinished_rows(tmp_path):
