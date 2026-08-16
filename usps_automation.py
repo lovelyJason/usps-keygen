@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -9,8 +10,10 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urlsplit
 
+from browser_fingerprint import load_browser_fingerprint
 from mailbox_client import MailboxClient, MailboxError, VerificationMessage
 from models import RegistrationData, RegistrationResult
+from proxy_io import proxy_for_playwright
 from usps_helpers import (
     RegistrationFlowError,
     fill_with_events,
@@ -36,6 +39,7 @@ class AutomationConfig:
     mailbox_poll_seconds: float = 3
     profile_root: Path = Path.home() / ".usps-registration-mvp" / "profiles"
     artifact_dir: Path | None = None
+    failure_hold_seconds: int = 30
 
 
 class UspsRegistrationRunner:
@@ -59,15 +63,24 @@ class UspsRegistrationRunner:
             with sync_playwright() as playwright:
                 context = None
                 page = None
+                profile = None
                 try:
                     self._check_stop(stop_event)
-                    profile = self.config.profile_root / safe_slug(data.username)
-                    profile.mkdir(parents=True, exist_ok=True)
-                    context = playwright.chromium.launch_persistent_context(
-                        str(profile),
-                        headless=self.config.headless,
-                        viewport={"width": 1360, "height": 920},
+                    fingerprint = load_browser_fingerprint(data.browser_fingerprint)
+                    data.browser_fingerprint = fingerprint.serialized()
+                    profile = self.config.profile_root / (
+                        f"{safe_slug(data.username)}-{fingerprint.fingerprint_id}"
                     )
+                    profile.mkdir(parents=True, exist_ok=True)
+                    launch_options = {"headless": self.config.headless}
+                    launch_options.update(fingerprint.context_options())
+                    proxy = proxy_for_playwright(data.proxy)
+                    if proxy:
+                        launch_options["proxy"] = proxy
+                    context = playwright.chromium.launch_persistent_context(
+                        str(profile), **launch_options
+                    )
+                    context.add_init_script(fingerprint.init_script())
                     context.set_default_timeout(self.config.page_timeout_ms)
                     page = context.pages[0] if context.pages else context.new_page()
                     if data.account_type == "Business Account":
@@ -83,18 +96,27 @@ class UspsRegistrationRunner:
                     result = RegistrationResult.stopped(self.stage)
                 except RegistrationFlowError as exc:
                     result = RegistrationResult.failed(exc.stage, str(exc), page_url(page))
-                    save_redacted_screenshot(
+                    screenshot = save_redacted_screenshot(
                         page, self.config.artifact_dir, data.username, exc.stage
+                    )
+                    self._hold_failed_page(
+                        page, data.username, screenshot, stop_event, reporter
                     )
                 except Exception as exc:
                     result = RegistrationResult.failed(self.stage, str(exc), page_url(page))
-                    save_redacted_screenshot(
+                    screenshot = save_redacted_screenshot(
                         page, self.config.artifact_dir, data.username, self.stage
+                    )
+                    self._hold_failed_page(
+                        page, data.username, screenshot, stop_event, reporter
                     )
                 finally:
                     if context is not None:
                         with suppress(Exception):
                             context.close()
+                    if profile is not None:
+                        with suppress(Exception):
+                            shutil.rmtree(profile)
         except Exception as exc:
             result = RegistrationResult.failed(self.stage, str(exc))
 
@@ -102,6 +124,33 @@ class UspsRegistrationRunner:
         result.started_at = started
         result.finished_at = iso_now()
         return result
+
+    def _hold_failed_page(
+        self,
+        page,
+        username: str,
+        screenshot: Path | None,
+        stop_event: Event | None,
+        log: Callable[[str], None],
+    ) -> None:
+        if page is None or page.is_closed():
+            return
+        try:
+            title = page.title().strip() or "(无标题)"
+        except Exception:
+            title = "(无法读取标题)"
+        log(f"{username}: 失败页面标题：{title}")
+        log(f"{username}: 失败页面 URL：{page_url(page)}")
+        if screenshot:
+            log(f"{username}: 失败截图：{screenshot}")
+        seconds = max(0, self.config.failure_hold_seconds)
+        if self.config.headless or seconds == 0:
+            return
+        log(f"{username}: 失败页面保留 {seconds} 秒，点击停止可立即关闭")
+        if stop_event:
+            stop_event.wait(seconds)
+        else:
+            time.sleep(seconds)
 
     def _run_business(
         self,
@@ -114,6 +163,7 @@ class UspsRegistrationRunner:
         self.stage = "email_request"
         log(f"{data.username}: 打开 USPS 商业账号入口")
         page.goto(USPS_REGISTER_URL, wait_until="domcontentloaded")
+        self._raise_if_service_unavailable(page)
         page.locator("#rAccount2").check()
         page.locator("#btn-account-type-business-submit").click()
         page.wait_for_selector("#temail", state="visible")
@@ -195,6 +245,7 @@ class UspsRegistrationRunner:
         self._check_stop(stop_event)
         log(f"{data.username}: 打开 USPS 个人账号入口")
         page.goto(USPS_REGISTER_URL, wait_until="domcontentloaded")
+        self._raise_if_service_unavailable(page)
         page.locator("#rAccount1").check()
         page.locator("#btn-account-type-submit").click()
         page.wait_for_selector("#tuserName", state="visible")
@@ -228,6 +279,10 @@ class UspsRegistrationRunner:
         if state is PageState.SERVICE_TIMEOUT:
             raise RegistrationFlowError(
                 "usps_service_timeout", "USPS 创建账号请求超时，官方已确认账号未创建"
+            )
+        if state is PageState.SERVICE_UNAVAILABLE:
+            raise RegistrationFlowError(
+                "usps_service_unavailable", "USPS 当前返回官方服务故障页"
             )
         if state is PageState.WAITING_FOR_EMAIL or visible_otp_input(page):
             self.stage = "post_submit_mail"
@@ -300,27 +355,56 @@ class UspsRegistrationRunner:
             "#btn-address-wizard-continue-three",
         ]
         address_confirmed = False
-        for _ in range(8):
+        for _ in range(60):
             address_confirmed = address_confirmed or self._address_finalized(page)
             if page.locator(target_selector).is_visible() and address_confirmed:
                 return
             self._check_stop(stop_event)
+            if self._address_overlay_visible(page):
+                page.wait_for_timeout(500)
+                continue
             visible_address = page.locator("input[name='address']:visible").first
             if visible_address.count() and not visible_address.is_checked():
                 visible_address.check()
             clicked = False
             for selector in actions:
                 locator = page.locator(selector)
-                if locator.count() and locator.is_visible() and locator.is_enabled():
-                    locator.click()
+                if self._address_action_ready(locator):
+                    self._click_address_action(locator)
                     page.wait_for_timeout(500)
                     clicked = True
                     break
             if not clicked:
-                break
+                page.wait_for_timeout(500)
+                continue
         raise RegistrationFlowError(
             "address_verification", visible_errors(page) or "地址确认未完成"
         )
+
+    @staticmethod
+    def _address_action_ready(locator) -> bool:
+        if not locator.count() or not locator.is_visible() or not locator.is_enabled():
+            return False
+        classes = ""
+        with suppress(Exception):
+            classes = locator.get_attribute("class") or ""
+        return "disabled" not in classes.casefold().split()
+
+    @staticmethod
+    def _address_overlay_visible(page) -> bool:
+        overlay = page.locator(".blockUI:visible")
+        return bool(overlay.count() and overlay.first.is_visible())
+
+    @staticmethod
+    def _click_address_action(locator) -> None:
+        try:
+            locator.click(timeout=5_000)
+        except TypeError:
+            locator.click()
+        except Exception:
+            if not UspsRegistrationRunner._address_action_ready(locator):
+                raise
+            locator.evaluate("element => element.click()")
 
     def _start_business_address_search(
         self,
@@ -618,6 +702,10 @@ class UspsRegistrationRunner:
                 "USPS 创建账号请求超时，官方已确认账号未创建",
                 page.url,
             )
+        if state is PageState.SERVICE_UNAVAILABLE:
+            return RegistrationResult.failed(
+                "usps_service_unavailable", "USPS 当前返回官方服务故障页", page.url
+            )
         return RegistrationResult.failed(
             stage, visible_errors(page) or "未检测到 USPS 注册成功页面", page.url
         )
@@ -626,3 +714,10 @@ class UspsRegistrationRunner:
     def _check_stop(stop_event: Event | None) -> None:
         if stop_event and stop_event.is_set():
             raise InterruptedError("批量任务已停止")
+
+    @staticmethod
+    def _raise_if_service_unavailable(page) -> None:
+        if classify_browser_page(page) is PageState.SERVICE_UNAVAILABLE:
+            raise RegistrationFlowError(
+                "usps_service_unavailable", "USPS 当前返回官方服务故障页"
+            )

@@ -70,9 +70,11 @@ def now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
 
 
-def save_redacted_screenshot(page, artifact_dir: Path | None, username: str, stage: str) -> None:
+def save_redacted_screenshot(
+    page, artifact_dir: Path | None, username: str, stage: str
+) -> Path | None:
     if not page or page.is_closed() or not artifact_dir:
-        return
+        return None
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(artifact_dir, 0o700)
@@ -82,5 +84,6 @@ def save_redacted_screenshot(page, artifact_dir: Path | None, username: str, sta
         target = artifact_dir / f"{safe_slug(username)}-{safe_slug(stage)}.png"
         page.screenshot(path=str(target), full_page=True)
         os.chmod(target, 0o600)
+        return target
     except Exception:
-        pass
+        return None

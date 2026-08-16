@@ -4,10 +4,12 @@ import os
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QEventLoop, QSettings, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -27,27 +29,50 @@ from PySide6.QtWidgets import (
 )
 
 import checkpoint
-from batch_io import export_results, load_registration_csv, write_template
+from batch_engine import MAX_BATCH_WORKERS
+from batch_io import (
+    export_results,
+    load_registration_csv_with_stats,
+    materialize_csv_emails,
+    update_csv_status,
+    write_template,
+)
 from batch_worker import BatchWorker
+from browser_fingerprint import fingerprint_summary
 from mailbox_client import MailboxClient
 from models import RegistrationData, RegistrationResult
+from proxy_io import load_proxy_file, proxy_display
 from retry_policy import rotate_manual_retry_addresses, runnable_indices
-from ui_controls import make_spin
+from ui_controls import CheckBoxHeader, ProxyDropTable, make_spin
 from ui_style import APP_STYLE
+from version import APP_TITLE, WORKBENCH_TITLE
 
 DEFAULT_MAILBOX_URL = "https://velydora-mail-otp.hzj1248394650.workers.dev"
 ARTIFACT_DIR = Path.home() / ".usps-registration-mvp" / "run-artifacts"
 CHECKPOINT_PATH = Path.home() / ".usps-registration-mvp" / "batch-checkpoint.json"
+SELECT_COLUMN = 0
+EMAIL_COLUMN = 3
+PROXY_COLUMN = 4
+FINGERPRINT_COLUMN = 5
+STATUS_COLUMN = 8
+STAGE_COLUMN = 9
+MESSAGE_COLUMN = 10
+TOKEN_SETTINGS_KEY = "mailbox/api_token"
+LAST_CSV_PATH_KEY = "files/last_csv_path"
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("USPS 批量注册助手")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1180, 820)
         self.rows: list[RegistrationData] = []
         self.results: list[RegistrationResult] = []
         self.worker: BatchWorker | None = None
+        self._launch_in_progress = False
+        self.pending_proxies: list[str] = []
+        self.current_csv_path: Path | None = None
+        self.settings = QSettings("JasonHuang", "USPSBatchRegistration")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -55,7 +80,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        title = QLabel("USPS 批量注册工作台")
+        title = QLabel(WORKBENCH_TITLE)
         title.setObjectName("pageTitle")
         root.addWidget(title)
         root.addWidget(self._build_settings())
@@ -71,17 +96,20 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status_label)
         self._set_running(False)
         self._apply_style()
+        if os.getenv("USPS_DISABLE_AUTO_RESTORE") != "1":
+            self._restore_last_csv()
 
     def _build_settings(self) -> QGroupBox:
         box = QGroupBox("邮箱与执行设置")
         grid = QGridLayout(box)
 
         self.mailbox_url = QLineEdit(DEFAULT_MAILBOX_URL)
-        self.mailbox_token = QLineEdit(os.getenv("VELYDORA_API_TOKEN", ""))
+        saved_token = str(self.settings.value(TOKEN_SETTINGS_KEY, "") or "")
+        self.mailbox_token = QLineEdit(os.getenv("VELYDORA_API_TOKEN", saved_token))
         self.mailbox_token.setEchoMode(QLineEdit.Password)
-        self.mailbox_token.setPlaceholderText("Bearer Token，仅保存在当前进程")
+        self.mailbox_token.setPlaceholderText("Bearer Token，失去焦点后自动保存")
+        self.mailbox_token.editingFinished.connect(self._persist_mailbox_token)
         self.mailbox_domain = QLineEdit("velydora.com")
-        self.mailbox_prefix = QLineEdit("usps")
 
         grid.addWidget(QLabel("邮箱 API"), 0, 0)
         grid.addWidget(self.mailbox_url, 0, 1, 1, 3)
@@ -91,21 +119,44 @@ class MainWindow(QMainWindow):
         self.load_token_button.clicked.connect(self.load_token_file)
         grid.addWidget(self.load_token_button, 1, 3)
         grid.addWidget(QLabel("邮箱域名"), 2, 0)
-        grid.addWidget(self.mailbox_domain, 2, 1)
-        grid.addWidget(QLabel("地址前缀"), 2, 2)
-        grid.addWidget(self.mailbox_prefix, 2, 3)
+        grid.addWidget(self.mailbox_domain, 2, 1, 1, 3)
+
+        execution_controls = QHBoxLayout()
+        self.execution_mode = QComboBox()
+        self.execution_mode.addItem("顺序模式", "sequential")
+        self.execution_mode.addItem("并发模式", "concurrent")
+        self.execution_mode.currentIndexChanged.connect(self._on_execution_mode_changed)
+        self.worker_count = make_spin(1, MAX_BATCH_WORKERS, 2, " 个")
+        self.worker_count.setEnabled(False)
+        self.worker_count.setToolTip(
+            f"并发模式下同时运行的独立浏览器数量，硬上限 {MAX_BATCH_WORKERS}"
+        )
+        execution_fields = (
+            ("执行模式", self.execution_mode),
+            ("浏览器线程", self.worker_count),
+        )
+        for label, control in execution_fields:
+            form = QFormLayout()
+            form.addRow(label, control)
+            execution_controls.addLayout(form)
+        execution_controls.addStretch()
+        grid.addLayout(execution_controls, 3, 0, 1, 4)
 
         controls = QHBoxLayout()
         self.mail_timeout = make_spin(30, 600, 180, " 秒")
         self.poll_interval = make_spin(1, 30, 3, " 秒")
         self.row_delay = make_spin(0, 300, 5, " 秒")
         self.retry_count = make_spin(0, 3, 1, " 次")
-        self.headless = QCheckBox("后台浏览器")
+        self.failure_hold = make_spin(0, 300, 30, " 秒")
+        self.headless = QCheckBox("后台浏览器（无头模式）")
+        self.headless.setChecked(True)
+        self.headless.setToolTip("勾选后不显示 Chromium 窗口；排查页面问题时取消勾选")
         for label, control in (
             ("邮件超时", self.mail_timeout),
             ("轮询间隔", self.poll_interval),
             ("行间延迟", self.row_delay),
-            ("失败重试", self.retry_count),
+            ("额外重试", self.retry_count),
+            ("失败停留", self.failure_hold),
         ):
             form = QFormLayout()
             form.addRow(label, control)
@@ -115,8 +166,12 @@ class MainWindow(QMainWindow):
         self.test_mail_button = QPushButton("测试邮箱连接")
         self.test_mail_button.clicked.connect(self.test_mail_connection)
         controls.addWidget(self.test_mail_button)
-        grid.addLayout(controls, 3, 0, 1, 4)
+        grid.addLayout(controls, 4, 0, 1, 4)
         return box
+
+    def _on_execution_mode_changed(self) -> None:
+        concurrent = self.execution_mode.currentData() == "concurrent"
+        self.worker_count.setEnabled(concurrent and self.worker is None)
 
     def _build_actions(self) -> QGroupBox:
         box = QGroupBox("批量任务")
@@ -125,9 +180,15 @@ class MainWindow(QMainWindow):
         self.template_button.clicked.connect(self.save_template)
         self.import_button = QPushButton("导入 CSV")
         self.import_button.clicked.connect(self.import_csv)
+        self.proxy_button = QPushButton("导入代理 TXT")
+        self.proxy_button.setToolTip("也可以把代理 TXT 文件直接拖入下方表格")
+        self.proxy_button.clicked.connect(self.import_proxy_file)
+        self.skip_failed = QCheckBox("跳过失败项")
+        self.skip_failed.setChecked(True)
+        self.skip_failed.setToolTip("导入 CSV 时不加载最后一列 status 为 failed/失败的行")
         self.checkpoint_button = QPushButton("载入检查点")
         self.checkpoint_button.clicked.connect(self.restore_checkpoint)
-        self.start_button = QPushButton("开始全部")
+        self.start_button = QPushButton("开始所选")
         self.start_button.setObjectName("primaryButton")
         self.start_button.clicked.connect(self.start_all)
         self.stop_button = QPushButton("停止")
@@ -136,12 +197,14 @@ class MainWindow(QMainWindow):
         self.retry_button.clicked.connect(self.retry_failed)
         self.export_button = QPushButton("导出结果")
         self.export_button.clicked.connect(self.export_csv)
-        self.export_sensitive = QCheckBox("含密码与安全答案")
+        self.export_sensitive = QCheckBox("含密码、代理凭据与安全答案")
         self.clear_button = QPushButton("清空")
         self.clear_button.clicked.connect(self.clear_rows)
         for button in (
             self.template_button,
             self.import_button,
+            self.proxy_button,
+            self.skip_failed,
             self.checkpoint_button,
             self.start_button,
             self.stop_button,
@@ -155,19 +218,36 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_table(self) -> QTableWidget:
-        table = QTableWidget(0, 8)
+        table = ProxyDropTable(0, 11)
         table.setHorizontalHeaderLabels(
-            ["序号", "账号类型", "邮箱", "用户名", "姓名", "状态", "阶段", "结果说明"]
+            [
+                "",
+                "序号",
+                "账号类型",
+                "邮箱",
+                "代理 IP",
+                "浏览器指纹",
+                "用户名",
+                "姓名",
+                "状态",
+                "阶段",
+                "结果说明",
+            ]
         )
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setAlternatingRowColors(True)
-        header = table.horizontalHeader()
-        for column in (0, 1, 3, 4, 5, 6):
+        header = CheckBoxHeader(Qt.Orientation.Horizontal, table)
+        table.setHorizontalHeader(header)
+        self.selection_header = header
+        header.toggle_all_requested.connect(self._set_all_selected)
+        for column in (0, 1, 2, 4, 5, 6, 7, 8, 9):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        table.itemChanged.connect(self._on_table_item_changed)
+        table.proxy_file_dropped.connect(self.load_proxy_path)
         self.table = table
         return table
 
@@ -183,7 +263,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "读取失败", str(exc))
             return
         self.mailbox_token.setText(token)
+        self._persist_mailbox_token()
         self.log_view.append("已载入 Token 文件，内容未写入日志。")
+
+    def _persist_mailbox_token(self) -> None:
+        token = self.mailbox_token.text().strip()
+        if token:
+            self.settings.setValue(TOKEN_SETTINGS_KEY, token)
+        else:
+            self.settings.remove(TOKEN_SETTINGS_KEY)
+        self.settings.sync()
 
     def test_mail_connection(self) -> None:
         try:
@@ -211,21 +300,91 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "导入注册 CSV", "", "CSV (*.csv)")
         if not path:
             return
+        self._load_csv_path(path)
+
+    def _load_csv_path(self, path: str, startup: bool = False) -> None:
         try:
-            rows = load_registration_csv(
+            rows, skipped = load_registration_csv_with_stats(
                 path,
                 mailbox_domain=self.mailbox_domain.text(),
-                mailbox_prefix=self.mailbox_prefix.text(),
+                skip_failed=self.skip_failed.isChecked(),
             )
         except Exception as exc:
-            QMessageBox.critical(self, "导入失败", str(exc))
+            if startup:
+                self.log_view.append(f"上次 CSV 自动加载失败：{exc}")
+            else:
+                QMessageBox.critical(self, "导入失败", str(exc))
             return
+        self.current_csv_path = Path(path)
+        self.settings.setValue(LAST_CSV_PATH_KEY, str(self.current_csv_path))
+        self.settings.sync()
         self.rows = rows
+        self._assign_pending_proxies()
         self.results = [RegistrationResult("pending", "queued", "等待执行") for _ in rows]
         self._render_rows()
         self._set_running(False)
-        self._save_checkpoint()
-        self.log_view.append(f"已导入 {len(rows)} 条注册数据。")
+        try:
+            materialize_csv_emails(self.current_csv_path, rows)
+        except Exception as exc:
+            self.log_view.append(f"CSV 随机邮箱/status 列回写失败：{exc}")
+        if rows:
+            self._save_checkpoint()
+        message = (
+            f"已从上次 CSV 路径自动加载 {len(rows)} 条注册数据"
+            if startup
+            else f"已导入 {len(rows)} 条注册数据"
+        )
+        if skipped:
+            message += f"，跳过失败项 {skipped} 条"
+        self.log_view.append(message + "。")
+
+    def _restore_last_csv(self) -> None:
+        path = str(self.settings.value(LAST_CSV_PATH_KEY, "") or "").strip()
+        if not path:
+            return
+        if not Path(path).is_file():
+            self.log_view.append(f"上次 CSV 路径已不存在：{path}")
+            return
+        self._load_csv_path(path, startup=True)
+
+    def import_proxy_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "导入代理 TXT", "", "Text files (*.txt)")
+        if path:
+            self.load_proxy_path(path)
+
+    def load_proxy_path(self, path: str) -> None:
+        try:
+            self.pending_proxies = load_proxy_file(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "代理导入失败", str(exc))
+            return
+        self._assign_pending_proxies()
+        if self.rows:
+            for index, row in enumerate(self.rows):
+                item = self.table.item(index, PROXY_COLUMN)
+                if item:
+                    item.setText(proxy_display(row.proxy))
+            self._save_checkpoint()
+        assigned = min(len(self.rows), len(self.pending_proxies))
+        unused = max(0, len(self.pending_proxies) - len(self.rows))
+        waiting = max(0, len(self.rows) - len(self.pending_proxies))
+        if not self.rows:
+            self.log_view.append(
+                f"已载入 {len(self.pending_proxies)} 个代理，导入 CSV 后将按顺序绑定。"
+            )
+        else:
+            detail = f"已按顺序绑定 {assigned} 个代理"
+            if unused:
+                detail += f"，剩余 {unused} 个未使用"
+            if waiting:
+                detail += f"，后 {waiting} 条任务保持直连"
+            self.log_view.append(detail + "。")
+
+    def _assign_pending_proxies(self) -> None:
+        if not self.pending_proxies:
+            return
+        for index, row in enumerate(self.rows):
+            row.proxy = self.pending_proxies[index] if index < len(self.pending_proxies) else ""
 
     def restore_checkpoint(self) -> None:
         if not CHECKPOINT_PATH.exists():
@@ -241,18 +400,18 @@ class MainWindow(QMainWindow):
         self.log_view.append(f"已恢复 {len(self.rows)} 条任务及原邮箱地址。")
 
     def start_all(self) -> None:
-        indices = runnable_indices(self.results)
+        indices = self._selected_runnable_indices()
         if not indices:
             QMessageBox.information(
-                self, "没有可执行项", "所有任务均已成功或需要人工核对，未重复提交。"
+                self, "没有可执行项", "请至少勾选一条尚未完成且可安全执行的任务。"
             )
             return
         self._start_indices(indices)
 
     def retry_failed(self) -> None:
-        indices = runnable_indices(self.results)
+        indices = self._selected_runnable_indices()
         if not indices:
-            QMessageBox.information(self, "无需重试", "当前没有未完成项。")
+            QMessageBox.information(self, "无需重试", "勾选范围内没有可安全重试的任务。")
             return
         self._start_indices(indices)
 
@@ -260,41 +419,62 @@ class MainWindow(QMainWindow):
         if not self.rows:
             QMessageBox.warning(self, "没有任务", "请先导入 CSV。")
             return
-        if not indices or self.worker:
+        if not indices or self.worker or self._launch_in_progress:
             return
+        self._launch_in_progress = True
         self._set_running(True)
-        QApplication.processEvents()
+        self.start_button.repaint()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         try:
             self._mailbox_client().verify_access()
         except Exception as exc:
+            self._launch_in_progress = False
             self._set_running(False)
             QMessageBox.warning(self, "邮箱预检失败", str(exc))
             return
         for index, email in rotate_manual_retry_addresses(self.rows, self.results, indices):
-            self.table.item(index, 2).setText(email)
+            self.table.item(index, EMAIL_COLUMN).setText(email)
             self.log_view.append(f"{self.rows[index].username}: 已为重试切换邮箱地址。")
         self._save_checkpoint()
         items = [(index, self.rows[index]) for index in indices]
-        self.worker = BatchWorker(
-            items=items,
-            mailbox_base_url=self.mailbox_url.text().strip(),
-            mailbox_token=self.mailbox_token.text().strip(),
-            mailbox_timeout_seconds=self.mail_timeout.value(),
-            poll_seconds=float(self.poll_interval.value()),
-            delay_seconds=float(self.row_delay.value()),
-            retries=self.retry_count.value(),
-            headless=self.headless.isChecked(),
-            artifact_dir=ARTIFACT_DIR,
-            checkpoint_path=CHECKPOINT_PATH,
-            all_rows=self.rows,
-            initial_results=self.results,
-        )
+        try:
+            self.worker = BatchWorker(
+                items=items,
+                mailbox_base_url=self.mailbox_url.text().strip(),
+                mailbox_token=self.mailbox_token.text().strip(),
+                mailbox_timeout_seconds=self.mail_timeout.value(),
+                poll_seconds=float(self.poll_interval.value()),
+                delay_seconds=float(self.row_delay.value()),
+                retries=self.retry_count.value(),
+                headless=self.headless.isChecked(),
+                artifact_dir=ARTIFACT_DIR,
+                checkpoint_path=CHECKPOINT_PATH,
+                all_rows=self.rows,
+                initial_results=self.results,
+                failure_hold_seconds=self.failure_hold.value(),
+                execution_mode=str(self.execution_mode.currentData()),
+                worker_count=self.worker_count.value(),
+            )
+        except Exception as exc:
+            self._launch_in_progress = False
+            self._set_running(False)
+            QMessageBox.warning(self, "任务启动失败", str(exc))
+            return
         self.worker.row_attempt.connect(self.on_row_attempt)
         self.worker.row_result.connect(self.on_row_result)
         self.worker.row_email_changed.connect(self.on_row_email_changed)
+        self.worker.row_fingerprint_changed.connect(self.on_row_fingerprint_changed)
         self.worker.log.connect(self.log_view.append)
         self.worker.finished.connect(self.on_batch_finished)
-        self.worker.start()
+        try:
+            self.worker.start()
+        except Exception as exc:
+            self.worker = None
+            self._launch_in_progress = False
+            self._set_running(False)
+            QMessageBox.warning(self, "任务启动失败", str(exc))
+            return
+        self._launch_in_progress = False
 
     def stop_batch(self) -> None:
         if self.worker:
@@ -314,16 +494,26 @@ class MainWindow(QMainWindow):
         self.results[index] = result
         self._render_result(index)
         self.log_view.append(f"{self.rows[index].username}: {result.status} - {result.message}")
+        if self.current_csv_path:
+            try:
+                update_csv_status(self.current_csv_path, self.rows[index], result.status)
+            except Exception as exc:
+                self.log_view.append(f"CSV 状态回写失败：{exc}")
 
     def on_row_email_changed(self, index: int, email: str) -> None:
         self.rows[index].email = email
-        self.table.item(index, 2).setText(email)
+        self.table.item(index, EMAIL_COLUMN).setText(email)
         self.log_view.append(f"{self.rows[index].username}: 重试已切换到新的邮箱地址。")
+
+    def on_row_fingerprint_changed(self, index: int, summary: str) -> None:
+        self.table.item(index, FINGERPRINT_COLUMN).setText(summary)
+        self.log_view.append(f"{self.rows[index].username}: 新浏览器指纹 {summary}")
 
     def on_batch_finished(self) -> None:
         if self.worker:
             self._merge_worker_results(self.worker)
         self.worker = None
+        self._launch_in_progress = False
         self._set_running(False)
         self._update_summary()
         self.log_view.append("本轮批量任务已结束。")
@@ -344,7 +534,7 @@ class MainWindow(QMainWindow):
             choice = QMessageBox.warning(
                 self,
                 "确认导出敏感凭据",
-                "文件将包含账号密码和安全问题答案，请只保存到受控目录。",
+                "文件将包含账号密码、代理凭据和安全问题答案，请只保存到受控目录。",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
@@ -374,27 +564,94 @@ class MainWindow(QMainWindow):
             return
         self.rows.clear()
         self.results.clear()
+        self.current_csv_path = None
+        self.settings.remove(LAST_CSV_PATH_KEY)
+        self.settings.sync()
         self.table.setRowCount(0)
+        self._update_header_check_state()
         self._update_summary()
         self._set_running(False)
 
     def _render_rows(self) -> None:
         self.table.setRowCount(len(self.rows))
         for index, data in enumerate(self.rows):
+            selected = QTableWidgetItem()
+            selected.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            selected.setCheckState(Qt.CheckState.Checked)
+            self.table.setItem(index, SELECT_COLUMN, selected)
             values = [
                 str(index + 1),
                 data.account_type.replace(" Account", ""),
                 data.email,
+                proxy_display(data.proxy),
+                fingerprint_summary(data.browser_fingerprint),
                 data.username,
                 f"{data.first_name} {data.last_name}",
                 "",
                 "",
                 "",
             ]
-            for column, value in enumerate(values):
+            for column, value in enumerate(values, start=1):
                 self.table.setItem(index, column, QTableWidgetItem(value))
             self._render_result(index)
+        self._update_header_check_state()
         self._update_summary()
+
+    def _set_all_selected(self, checked: bool) -> None:
+        self.table.blockSignals(True)
+        try:
+            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            for index in range(self.table.rowCount()):
+                item = self.table.item(index, SELECT_COLUMN)
+                if item is not None:
+                    item.setCheckState(state)
+        finally:
+            self.table.blockSignals(False)
+        self._update_header_check_state()
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == SELECT_COLUMN:
+            self._update_header_check_state()
+
+    def _update_header_check_state(self) -> None:
+        states = [
+            self.table.item(index, SELECT_COLUMN).checkState()
+            for index in range(self.table.rowCount())
+            if self.table.item(index, SELECT_COLUMN) is not None
+        ]
+        if states and all(state == Qt.CheckState.Checked for state in states):
+            header_state = Qt.CheckState.Checked
+        elif any(state == Qt.CheckState.Checked for state in states):
+            header_state = Qt.CheckState.PartiallyChecked
+        else:
+            header_state = Qt.CheckState.Unchecked
+        self.selection_header.set_check_state(header_state)
+
+    def _selected_runnable_indices(self) -> list[int]:
+        runnable = set(runnable_indices(self.results))
+        return [
+            index
+            for index in range(len(self.rows))
+            if index in runnable
+            and self.table.item(index, SELECT_COLUMN) is not None
+            and self.table.item(index, SELECT_COLUMN).checkState() == Qt.CheckState.Checked
+        ]
+
+    def _set_selection_enabled(self, enabled: bool) -> None:
+        self.selection_header.set_checkbox_enabled(enabled)
+        for index in range(self.table.rowCount()):
+            item = self.table.item(index, SELECT_COLUMN)
+            if item is None:
+                continue
+            flags = item.flags()
+            if enabled:
+                item.setFlags(flags | Qt.ItemFlag.ItemIsEnabled)
+            else:
+                item.setFlags(flags & ~Qt.ItemFlag.ItemIsEnabled)
 
     def _render_result(self, index: int) -> None:
         result = self.results[index]
@@ -405,9 +662,9 @@ class MainWindow(QMainWindow):
             "failed": "失败",
             "stopped": "已停止",
         }
-        self.table.item(index, 5).setText(labels.get(result.status, result.status))
-        self.table.item(index, 6).setText(result.stage)
-        self.table.item(index, 7).setText(result.message)
+        self.table.item(index, STATUS_COLUMN).setText(labels.get(result.status, result.status))
+        self.table.item(index, STAGE_COLUMN).setText(result.stage)
+        self.table.item(index, MESSAGE_COLUMN).setText(result.message)
 
     def _update_summary(self) -> None:
         statuses = ("pending", "running", "success", "failed", "stopped")
@@ -456,21 +713,28 @@ class MainWindow(QMainWindow):
             if 0 <= index < len(self.results):
                 self.results[index] = result
                 changed = True
-                self.table.item(index, 2).setText(self.rows[index].email)
-                if self.table.item(index, 5):
+                self.table.item(index, EMAIL_COLUMN).setText(self.rows[index].email)
+                if self.table.item(index, STATUS_COLUMN):
                     self._render_result(index)
         if changed:
             self._save_checkpoint()
 
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running and bool(self.rows))
+        self._set_selection_enabled(not running)
         self.stop_button.setEnabled(running)
         self.retry_button.setEnabled(not running and bool(self.rows))
         self.import_button.setEnabled(not running)
+        self.proxy_button.setEnabled(not running)
+        self.skip_failed.setEnabled(not running)
         self.checkpoint_button.setEnabled(not running)
         self.clear_button.setEnabled(not running and bool(self.rows))
         self.export_button.setEnabled(not running and bool(self.rows))
         self.test_mail_button.setEnabled(not running)
+        self.execution_mode.setEnabled(not running)
+        self.worker_count.setEnabled(
+            not running and self.execution_mode.currentData() == "concurrent"
+        )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:

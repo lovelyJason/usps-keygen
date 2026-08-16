@@ -37,6 +37,26 @@ def test_classify_explicit_usps_request_timeout():
     assert state is PageState.SERVICE_TIMEOUT
 
 
+def test_classify_official_usps_outage_page():
+    state = classify_page(
+        "https://www.usps.com/root/global/server_responses/anyapp_outage_apology.htm",
+        "This service is currently unavailable | USPS",
+        "This service is currently unavailable",
+    )
+    assert state is PageState.SERVICE_UNAVAILABLE
+
+
+def test_official_usps_outage_fails_fast_before_form_wait():
+    page = FakePage()
+    page.url = "https://www.usps.com/root/global/server_responses/anyapp_outage_apology.htm"
+    page.body = "This service is currently unavailable"
+
+    with pytest.raises(RegistrationFlowError) as error:
+        UspsRegistrationRunner._raise_if_service_unavailable(page)
+
+    assert error.value.stage == "usps_service_unavailable"
+
+
 def test_classify_success_page():
     state = classify_page(
         "https://reg.usps.com/success",
@@ -155,6 +175,59 @@ def test_classify_rejects_cross_block_help_and_conditional_text():
 def test_classify_captcha_page():
     state = classify_page("https://reg.usps.com/register", "Verify", "Complete the CAPTCHA")
     assert state is PageState.CAPTCHA_REQUIRED
+
+
+def test_visible_failure_page_is_held_and_diagnostics_are_logged(tmp_path):
+    class Page:
+        url = "https://reg.usps.com/outage"
+
+        def is_closed(self):
+            return False
+
+        def title(self):
+            return "USPS Service Unavailable"
+
+    class StopEvent:
+        waits = []
+
+        def wait(self, seconds):
+            self.waits.append(seconds)
+            return False
+
+    logs = []
+    stop = StopEvent()
+    runner = UspsRegistrationRunner(
+        AutomationConfig(headless=False, failure_hold_seconds=30)
+    )
+    screenshot = tmp_path / "failure.png"
+
+    runner._hold_failed_page(Page(), "test-user", screenshot, stop, logs.append)
+
+    assert stop.waits == [30]
+    assert any("USPS Service Unavailable" in message for message in logs)
+    assert any("https://reg.usps.com/outage" in message for message in logs)
+    assert any(str(screenshot) in message for message in logs)
+    assert any("保留 30 秒" in message for message in logs)
+
+
+def test_headless_failure_does_not_wait():
+    class Page:
+        url = "https://reg.usps.com/outage"
+
+        def is_closed(self):
+            return False
+
+        def title(self):
+            return "Outage"
+
+    class StopEvent:
+        def wait(self, _seconds):
+            raise AssertionError("headless failures must not wait for visual inspection")
+
+    runner = UspsRegistrationRunner(
+        AutomationConfig(headless=True, failure_hold_seconds=30)
+    )
+    runner._hold_failed_page(Page(), "test-user", None, StopEvent(), lambda _message: None)
 
 
 class FakeLocator:
@@ -477,6 +550,125 @@ def test_business_address_confirmation_survives_wizard_page_transition():
 
     assert page.phase == "identity"
     assert page.clicks == ["#a-address-step1", "#btn-address-wizard-continue"]
+
+
+def test_address_wizard_skips_visible_css_disabled_old_step_button():
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            return 0 if self.selector == "input[name='address']:visible" else 1
+
+        def is_visible(self):
+            if self.selector == "#tfName":
+                return self.page.phase == "identity"
+            if self.selector in ("#addressHolderStep6", "#unconfirmed-address"):
+                return self.page.phase == "accepted"
+            return self.page.phase == "accepted" and self.selector in (
+                "#a-address-step2",
+                "#btn-address-wizard-continue-three",
+            )
+
+        def is_enabled(self):
+            return True
+
+        def get_attribute(self, name):
+            assert name == "class"
+            return "btn btn-primary disabled" if self.selector == "#a-address-step2" else "btn"
+
+        def click(self, timeout):
+            assert timeout == 5_000
+            if self.selector == "#a-address-step2":
+                raise AssertionError("CSS-disabled previous-step button must be skipped")
+            if self.selector == "#btn-address-wizard-continue-three":
+                self.page.clicks.append(self.selector)
+                self.page.phase = "identity"
+
+    class Page:
+        def __init__(self):
+            self.phase = "accepted"
+            self.clicks = []
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def wait_for_timeout(self, _milliseconds):
+            pass
+
+    page = Page()
+    runner = UspsRegistrationRunner(AutomationConfig())
+    runner._start_business_address_search = lambda *_args: None
+
+    runner._complete_address_wizard(page, "#tfName", Event())
+
+    assert page.phase == "identity"
+    assert page.clicks == ["#btn-address-wizard-continue-three"]
+
+
+def test_address_wizard_waits_for_loading_overlay_before_next_step():
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            return 0 if self.selector == "input[name='address']:visible" else 1
+
+        def is_visible(self):
+            if self.selector == ".blockUI:visible":
+                return self.page.overlay_ticks > 0
+            if self.selector == "#tfName":
+                return self.page.phase == "identity"
+            if self.selector in ("#addressHolderStep6", "#unconfirmed-address"):
+                return self.page.phase == "accepted"
+            return (
+                self.page.phase == "original" and self.selector == "#a-address-step2"
+            ) or (
+                self.page.phase == "accepted"
+                and self.selector == "#btn-address-wizard-continue-three"
+            )
+
+        def is_enabled(self):
+            return True
+
+        def get_attribute(self, _name):
+            return "btn"
+
+        def click(self, timeout):
+            assert timeout == 5_000
+            self.page.clicks.append(self.selector)
+            if self.selector == "#a-address-step2":
+                self.page.overlay_ticks = 5
+            elif self.selector == "#btn-address-wizard-continue-three":
+                self.page.phase = "identity"
+
+    class Page:
+        def __init__(self):
+            self.phase = "original"
+            self.overlay_ticks = 0
+            self.clicks = []
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def wait_for_timeout(self, _milliseconds):
+            if self.overlay_ticks:
+                self.overlay_ticks -= 1
+                if self.overlay_ticks == 0:
+                    self.phase = "accepted"
+
+    page = Page()
+    runner = UspsRegistrationRunner(AutomationConfig())
+    runner._start_business_address_search = lambda *_args: None
+
+    runner._complete_address_wizard(page, "#tfName", Event())
+
+    assert page.phase == "identity"
+    assert page.clicks == ["#a-address-step2", "#btn-address-wizard-continue-three"]
 
 
 def test_business_address_outage_retries_then_uses_original_address(monkeypatch):

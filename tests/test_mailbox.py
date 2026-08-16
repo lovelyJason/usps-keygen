@@ -1,13 +1,32 @@
+import json
+import ssl
 import threading
+from urllib.error import URLError
 
 import pytest
 
+import mailbox_client
 from mailbox_client import (
     MailboxClient,
+    MailboxConnectionError,
     MailboxProtocolError,
     VerificationMessage,
     extract_usps_validation_url,
 )
+
+
+class Response:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
 
 
 def test_extract_usps_validation_url_accepts_only_expected_host():
@@ -232,3 +251,50 @@ def test_poll_can_be_stopped(monkeypatch):
     stop.set()
     with pytest.raises(InterruptedError):
         client.poll_verification("a@b.com", 0, 60, 1, stop_event=stop)
+
+
+def test_get_retries_tls_unexpected_eof(monkeypatch):
+    calls = 0
+
+    def flaky_urlopen(_request, timeout):
+        nonlocal calls
+        calls += 1
+        assert timeout == 15
+        if calls < 3:
+            raise URLError(ssl.SSLError("UNEXPECTED_EOF_WHILE_READING"))
+        return Response({"status": "ok"})
+
+    monkeypatch.setattr(mailbox_client, "urlopen", flaky_urlopen)
+    client = MailboxClient("https://mail.example", "secret", retry_backoff=0)
+
+    assert client.health() == {"status": "ok"}
+    assert calls == 3
+
+
+def test_poll_continues_after_exhausted_transient_connection_error(monkeypatch):
+    client = MailboxClient("https://mail.example", "secret", retry_backoff=0)
+    responses = [
+        MailboxConnectionError("temporary TLS EOF"),
+        {
+            "items": [
+                {
+                    "id": 9,
+                    "received_at": 1200,
+                    "code": "483920",
+                    "sender": "USPostalService@usps.com",
+                    "subject": "Code",
+                }
+            ]
+        },
+    ]
+
+    def request(*_args, **_kwargs):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(client, "_request_json", request)
+
+    message = client.poll_verification("a@b.com", 1000, 1, 0)
+    assert message.value == "483920"

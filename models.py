@@ -10,6 +10,8 @@ ACCOUNT_TYPES = ("Business Account", "Personal Account")
 class RegistrationData:
     account_type: str = "Business Account"
     email: str = ""
+    proxy: str = ""
+    browser_fingerprint: str = ""
     username: str = ""
     password: str = ""
     first_name: str = ""

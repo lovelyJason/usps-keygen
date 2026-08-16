@@ -1,11 +1,14 @@
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("USPS_DISABLE_AUTO_RESTORE", "1")
 
+from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import main
-from main import MainWindow
+from main import PROXY_COLUMN, MainWindow
 from models import RegistrationData, RegistrationResult
 from retry_policy import rotate_manual_retry_addresses, runnable_indices
 
@@ -67,6 +70,7 @@ def test_start_preflights_authenticated_mailbox_access(monkeypatch, tmp_path):
             self.row_attempt = Signal()
             self.row_result = Signal()
             self.row_email_changed = Signal()
+            self.row_fingerprint_changed = Signal()
             self.log = Signal()
             self.finished = Signal()
 
@@ -108,6 +112,289 @@ def test_failed_startup_restores_start_button(monkeypatch):
     assert window.start_button.isEnabled()
     assert not window.stop_button.isEnabled()
     assert window.worker is None
+    assert not window._launch_in_progress
+    window.close()
+
+
+def test_start_is_visually_disabled_before_preflight_and_reentrant_click_is_ignored(
+    monkeypatch, tmp_path
+):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="user", email="a@b.com")]
+    window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window._render_rows()
+    window._set_running(False)
+    verified = []
+    workers = []
+
+    class Mailbox:
+        def verify_access(self):
+            verified.append(True)
+            assert not window.start_button.isEnabled()
+            assert window._launch_in_progress
+            window._start_indices([0])
+
+    class Signal:
+        def connect(self, _callback):
+            pass
+
+    class Worker:
+        def __init__(self, **_kwargs):
+            workers.append(self)
+            self.row_attempt = Signal()
+            self.row_result = Signal()
+            self.row_email_changed = Signal()
+            self.row_fingerprint_changed = Signal()
+            self.log = Signal()
+            self.finished = Signal()
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(window, "_mailbox_client", lambda: Mailbox())
+    monkeypatch.setattr(main, "BatchWorker", Worker)
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
+
+    window._start_indices([0])
+
+    assert verified == [True]
+    assert len(workers) == 1
+    assert not window.start_button.isEnabled()
+    assert not window._launch_in_progress
+    window.close()
+
+
+def test_imported_rows_are_selected_by_default_and_start_only_checked(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [
+        RegistrationData(username="first", email="first@example.com"),
+        RegistrationData(username="second", email="second@example.com"),
+        RegistrationData(username="third", email="third@example.com"),
+    ]
+    window.results = [RegistrationResult("pending", "queued", "waiting") for _ in window.rows]
+    window._render_rows()
+
+    assert all(
+        window.table.item(index, 0).checkState() == Qt.CheckState.Checked
+        for index in range(3)
+    )
+
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    window.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
+    started = []
+    monkeypatch.setattr(window, "_start_indices", lambda indices: started.extend(indices))
+
+    window.start_all()
+
+    assert started == [1]
+    window.close()
+
+
+def test_row_selection_is_locked_while_batch_is_running():
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="user", email="a@b.com")]
+    window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window._render_rows()
+
+    window._set_running(True)
+    assert not (window.table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEnabled)
+
+    window._set_running(False)
+    assert window.table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEnabled
+    window.close()
+
+
+def test_header_checkbox_selects_and_clears_all_rows():
+    app()
+    window = MainWindow()
+    window.rows = [
+        RegistrationData(username="first", email="first@example.com"),
+        RegistrationData(username="second", email="second@example.com"),
+    ]
+    window.results = [RegistrationResult("pending", "queued", "waiting") for _ in window.rows]
+    window._render_rows()
+    window.show()
+    QApplication.processEvents()
+    header = window.selection_header
+    click_point = QPoint(header.sectionSize(0) // 2, header.height() // 2)
+
+    assert window.selection_header._check_state == Qt.CheckState.Checked
+    QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=click_point)
+    assert all(
+        window.table.item(index, 0).checkState() == Qt.CheckState.Unchecked
+        for index in range(2)
+    )
+    assert window.selection_header._check_state == Qt.CheckState.Unchecked
+
+    QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=click_point)
+    assert all(
+        window.table.item(index, 0).checkState() == Qt.CheckState.Checked
+        for index in range(2)
+    )
+    window.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert window.selection_header._check_state == Qt.CheckState.PartiallyChecked
+    window.close()
+
+
+def test_api_token_is_persisted_on_focus_loss(monkeypatch):
+    stored = {}
+
+    class Settings:
+        def __init__(self, *_args):
+            pass
+
+        def value(self, key, default=""):
+            return stored.get(key, default)
+
+        def setValue(self, key, value):
+            stored[key] = value
+
+        def remove(self, key):
+            stored.pop(key, None)
+
+        def sync(self):
+            pass
+
+    monkeypatch.setattr(main, "QSettings", Settings)
+    monkeypatch.delenv("VELYDORA_API_TOKEN", raising=False)
+    app()
+    window = MainWindow()
+    window.mailbox_token.setText(" persisted-token ")
+
+    window.mailbox_token.editingFinished.emit()
+
+    assert stored[main.TOKEN_SETTINGS_KEY] == "persisted-token"
+    window.close()
+
+    restored = MainWindow()
+    assert restored.mailbox_token.text() == "persisted-token"
+    restored.mailbox_token.clear()
+    restored.mailbox_token.editingFinished.emit()
+    assert main.TOKEN_SETTINGS_KEY not in stored
+    restored.close()
+
+
+def test_execution_mode_controls_have_hard_browser_limit():
+    app()
+    window = MainWindow()
+
+    assert window.execution_mode.currentData() == "sequential"
+    assert not window.worker_count.isEnabled()
+    assert window.worker_count.maximum() == 5
+    assert "v2.1.0" in window.windowTitle()
+    assert window.skip_failed.isChecked()
+    assert window.headless.isChecked()
+
+    window.execution_mode.setCurrentIndex(1)
+    assert window.execution_mode.currentData() == "concurrent"
+    assert window.worker_count.isEnabled()
+    window.close()
+
+
+def test_proxy_file_is_bound_in_row_order_and_masked_in_table(monkeypatch, tmp_path):
+    app()
+    window = MainWindow()
+    window.rows = [
+        RegistrationData(username="first", email="first@example.com"),
+        RegistrationData(username="second", email="second@example.com"),
+    ]
+    window.results = [RegistrationResult("pending", "queued", "waiting") for _ in window.rows]
+    window._render_rows()
+    monkeypatch.setattr(window, "_save_checkpoint", lambda: None)
+    path = tmp_path / "proxies.txt"
+    path.write_text(
+        "127.0.0.1:8001:user1:secret1\n127.0.0.2:8002:user2:secret2\n",
+        encoding="utf-8",
+    )
+
+    window.load_proxy_path(str(path))
+
+    assert window.table.item(0, PROXY_COLUMN).text() == "127.0.0.1:8001"
+    assert window.table.item(1, PROXY_COLUMN).text() == "127.0.0.2:8002"
+    assert "secret" not in window.table.item(0, PROXY_COLUMN).text()
+    assert "user1" in window.rows[0].proxy
+    assert "user2" in window.rows[1].proxy
+    window.close()
+
+
+def test_proxy_table_accepts_txt_file_urls(tmp_path):
+    app()
+    window = MainWindow()
+    path = tmp_path / "proxies.txt"
+    path.write_text("127.0.0.1:8080", encoding="utf-8")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+
+    assert window.table._first_proxy_path(mime) == str(path)
+    window.close()
+
+
+def test_last_csv_path_is_automatically_restored(monkeypatch, tmp_path):
+    source = tmp_path / "last.csv"
+    source.write_text(
+        "account_type,username,password,first_name,last_name,address1,city,state,zip_code,"
+        "phone,security_answer1,security_answer2,status\n"
+        "Personal Account,failed-user,ValidPass123,A,B,1 Main,Austin,TX,78701,"
+        "5125550100,X,Y,failed\n"
+        "Personal Account,ready-user,ValidPass123,C,D,2 Main,Austin,TX,78701,"
+        "5125550101,X,Z,\n",
+        encoding="utf-8",
+    )
+    stored = {main.LAST_CSV_PATH_KEY: str(source)}
+
+    class Settings:
+        def __init__(self, *_args):
+            pass
+
+        def value(self, key, default=""):
+            return stored.get(key, default)
+
+        def setValue(self, key, value):
+            stored[key] = value
+
+        def remove(self, key):
+            stored.pop(key, None)
+
+        def sync(self):
+            pass
+
+    monkeypatch.setattr(main, "QSettings", Settings)
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
+    monkeypatch.delenv("USPS_DISABLE_AUTO_RESTORE", raising=False)
+
+    window = MainWindow()
+
+    assert [row.username for row in window.rows] == ["ready-user"]
+    assert window.current_csv_path == source
+    assert "跳过失败项 1 条" in window.log_view.toPlainText()
+    window.close()
+
+
+def test_final_failure_is_written_back_to_source_csv(monkeypatch, tmp_path):
+    app()
+    window = MainWindow()
+    source = tmp_path / "source.csv"
+    source.write_text(
+        "account_type,username,password,first_name,last_name,address1,city,state,zip_code,"
+        "phone,security_answer1,security_answer2,status\n"
+        "Personal Account,user1,ValidPass123,A,B,1 Main,Austin,TX,78701,"
+        "5125550100,X,Y,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
+    window._load_csv_path(str(source))
+
+    window.on_row_result(0, RegistrationResult.failed("identity_verification", "rejected"))
+
+    lines = source.read_text(encoding="utf-8-sig").splitlines()
+    assert lines[0].split(",")[-1] == "status"
+    assert lines[1].split(",")[-1] == "failed"
     window.close()
 
 

@@ -1,4 +1,5 @@
 import threading
+import time
 
 from batch_engine import process_batch
 from models import RegistrationData, RegistrationResult
@@ -75,6 +76,29 @@ def test_explicit_usps_service_timeout_is_safely_retried():
     assert results[0].status == "success"
 
 
+def test_explicit_usps_service_unavailable_is_safely_retried():
+    attempts = 0
+
+    def run_one(_data):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return RegistrationResult.failed("usps_service_unavailable", "official outage")
+        return RegistrationResult.success("complete", "https://reg.usps.com/done")
+
+    results = process_batch(
+        [(0, row("flaky-usps"))],
+        run_one,
+        retries=1,
+        delay_seconds=0,
+        stop_event=threading.Event(),
+        retry_backoff_seconds=0,
+    )
+
+    assert attempts == 2
+    assert results[0].status == "success"
+
+
 def test_pre_stopped_batch_does_not_call_runner():
     stop = threading.Event()
     stop.set()
@@ -127,3 +151,56 @@ def test_prepare_attempt_runs_before_each_runner_call():
         on_prepare_attempt=prepare,
     )
     assert seen == ["attempt-1@velydora.com", "attempt-2@velydora.com"]
+
+
+def test_concurrent_mode_overlaps_work_and_enforces_hard_cap():
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def run_one(_data):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return RegistrationResult.success("complete", "done")
+
+    items = [(index, row(f"user-{index}")) for index in range(12)]
+    results = process_batch(
+        items,
+        run_one,
+        retries=0,
+        delay_seconds=0,
+        stop_event=threading.Event(),
+        max_workers=999,
+    )
+
+    assert len(results) == 12
+    assert 2 <= peak <= 5
+
+
+def test_sequential_mode_never_overlaps_rows():
+    active = 0
+    peak = 0
+
+    def run_one(_data):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        time.sleep(0.01)
+        active -= 1
+        return RegistrationResult.success("complete", "done")
+
+    process_batch(
+        [(index, row(f"user-{index}")) for index in range(4)],
+        run_one,
+        retries=0,
+        delay_seconds=0,
+        stop_event=threading.Event(),
+        max_workers=1,
+    )
+
+    assert peak == 1

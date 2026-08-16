@@ -1,0 +1,4 @@
+APP_VERSION = "2.1.0"
+APP_TITLE = f"USPS 批量注册助手 v{APP_VERSION}"
+WORKBENCH_TITLE = f"USPS 批量注册工作台 v{APP_VERSION}"
+WINDOWS_DIST_NAME = f"USPSBatchRegistration-v{APP_VERSION}-Windows-x64"

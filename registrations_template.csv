@@ -1,2 +1,2 @@
-account_type,email,username,password,first_name,last_name,company,address1,address2,city,state,zip_code,phone,security_answer1,security_answer2
-Business Account,,example-user-001,ReplaceMe123,Jane,Doe,Example LLC,123 Example Ave,,Example City,CA,90000,2025550100,ReplaceAnswerOne,ReplaceAnswerTwo
+﻿account_type,email,proxy,username,password,first_name,last_name,company,address1,address2,city,state,zip_code,phone,security_answer1,security_answer2,status
+Business Account,,,example-user-001,ReplaceMe123,Jane,Doe,Example LLC,123 Example Ave,,Example City,CA,90000,2025550100,ReplaceAnswerOne,ReplaceAnswerTwo,
