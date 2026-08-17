@@ -295,7 +295,7 @@ def test_execution_mode_controls_have_hard_browser_limit():
     assert window.worker_count.isEnabled()
     assert window.worker_count.maximum() == 5
     assert window.failure_hold.value() == 10
-    assert "v2.2.3" in window.windowTitle()
+    assert "v2.2.4" in window.windowTitle()
     assert window.skip_failed.isChecked()
     assert window.headless.isChecked()
     assert window.manual_mailbox_takeover.isChecked()

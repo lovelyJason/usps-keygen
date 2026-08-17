@@ -58,7 +58,7 @@ class UspsRegistrationRunner:
         log: Callable[[str], None] | None = None,
         verification_required: Callable[[], None] | None = None,
     ) -> RegistrationResult:
-        from playwright.sync_api import sync_playwright
+        from patchright.sync_api import sync_playwright
 
         reporter = log or (lambda _message: None)
         started = iso_now()
@@ -77,14 +77,13 @@ class UspsRegistrationRunner:
                     )
                     profile.mkdir(parents=True, exist_ok=True)
                     launch_options = {"headless": self.config.headless}
-                    launch_options.update(fingerprint.context_options())
+                    launch_options.update(fingerprint.context_options(playwright.chromium.executable_path))
                     proxy = proxy_for_playwright(data.proxy)
                     if proxy:
                         launch_options["proxy"] = proxy
                     context = playwright.chromium.launch_persistent_context(
                         str(profile), **launch_options
                     )
-                    context.add_init_script(fingerprint.init_script())
                     context.set_default_timeout(self.config.page_timeout_ms)
                     page = context.pages[0] if context.pages else context.new_page()
                     if data.account_type == "Business Account":

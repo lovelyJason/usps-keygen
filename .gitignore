@@ -1,4 +1,6 @@
 .venv/
+.playwright-browsers/
+.patchright-browsers/
 .pytest_cache/
 .ruff_cache/
 __pycache__/

@@ -681,6 +681,11 @@ def main() -> int:
         browser_dir = Path(sys.executable).resolve().parent / "playwright-browsers"
         if browser_dir.is_dir():
             os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_dir))
+    if "--browser-smoke" in sys.argv:
+        from browser_runtime import smoke_browser_runtime
+
+        smoke_browser_runtime()
+        return 0
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

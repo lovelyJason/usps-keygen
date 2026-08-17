@@ -3,14 +3,14 @@
 from PyInstaller.utils.hooks import collect_all
 
 
-playwright_data, playwright_binaries, playwright_hidden = collect_all("playwright")
+patchright_data, patchright_binaries, patchright_hidden = collect_all("patchright")
 
 analysis = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=playwright_binaries,
-    datas=playwright_data + [("registrations_template.csv", ".")],
-    hiddenimports=playwright_hidden,
+    binaries=patchright_binaries,
+    datas=patchright_data + [("registrations_template.csv", ".")],
+    hiddenimports=patchright_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

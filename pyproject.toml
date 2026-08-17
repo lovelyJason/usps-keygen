@@ -1,10 +1,10 @@
 [project]
 name = "usps-registration-mvp"
-version = "2.2.3"
+version = "2.2.4"
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=42,<47",
-    "playwright>=1.45,<2",
+    "patchright>=1.55,<2",
     "pyside6>=6.7,<7",
 ]
 

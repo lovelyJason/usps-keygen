@@ -55,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PWD ".playwright-browsers"
-          python -m playwright install chromium
+          python -m patchright install chromium
 
       - name: Build application
         shell: pwsh
@@ -76,6 +76,11 @@ jobs:
           if ((Get-Item $exe).Length -lt 1MB) { throw "Executable is unexpectedly small" }
           if (-not (Test-Path "dist\$env:DIST_NAME\playwright-browsers")) {
             throw "Bundled Chromium is missing"
+          }
+          $process = Start-Process -FilePath $exe -ArgumentList "--browser-smoke" `
+            -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged browser runtime smoke test failed with exit code $($process.ExitCode)"
           }
 
       - name: Create ZIP
