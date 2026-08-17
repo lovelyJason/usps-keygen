@@ -684,8 +684,13 @@ def main() -> int:
     if "--browser-smoke" in sys.argv:
         from browser_runtime import smoke_browser_runtime
 
-        smoke_browser_runtime()
-        return 0
+        try:
+            smoke_browser_runtime()
+            return 0
+        except Exception as exc:
+            error_log = Path(sys.executable).resolve().parent / "browser-smoke-error.txt"
+            error_log.write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
+            return 2
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

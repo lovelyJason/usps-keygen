@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urlsplit
 
-from browser_fingerprint import load_browser_fingerprint
+from browser_fingerprint import detect_browser_major, load_browser_fingerprint
 from mailbox_client import MailboxClient, MailboxError, VerificationMessage
 from manual_verification import ManualVerificationValue, wait_for_verification_value
 from models import RegistrationData, RegistrationResult
@@ -77,7 +77,8 @@ class UspsRegistrationRunner:
                     )
                     profile.mkdir(parents=True, exist_ok=True)
                     launch_options = {"headless": self.config.headless}
-                    launch_options.update(fingerprint.context_options(playwright.chromium.executable_path))
+                    browser_major = detect_browser_major(playwright.chromium)
+                    launch_options.update(fingerprint.context_options(browser_major))
                     proxy = proxy_for_playwright(data.proxy)
                     if proxy:
                         launch_options["proxy"] = proxy

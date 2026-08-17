@@ -1,6 +1,3 @@
-from subprocess import CompletedProcess
-
-import browser_fingerprint
 from browser_fingerprint import (
     fingerprint_summary,
     generate_browser_fingerprint,
@@ -43,18 +40,28 @@ def test_legacy_script_injected_fingerprint_is_replaced():
     assert "user_agent" not in restored.context_options()
 
 
-def test_runtime_user_agent_uses_actual_browser_major_and_platform(monkeypatch):
-    browser_fingerprint.runtime_user_agent.cache_clear()
-    monkeypatch.setattr(
-        browser_fingerprint.subprocess,
-        "run",
-        lambda *_args, **_kwargs: CompletedProcess(
-            args=[], returncode=0, stdout="Google Chrome for Testing 149.0.7827.55\n"
-        ),
-    )
+def test_runtime_user_agent_uses_actual_browser_major_and_platform():
+    from browser_fingerprint import runtime_user_agent
 
-    user_agent = browser_fingerprint.runtime_user_agent("chrome.exe", "win32")
+    user_agent = runtime_user_agent("149", "win32")
 
     assert "Windows NT 10.0; Win64; x64" in user_agent
     assert "Chrome/149.0.0.0" in user_agent
     assert "HeadlessChrome" not in user_agent
+
+
+def test_browser_major_is_read_from_patchright_browser():
+    from browser_fingerprint import detect_browser_major
+
+    class Browser:
+        version = "149.0.7827.55"
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    browser = Browser()
+
+    browser_type = type("BrowserType", (), {"launch": lambda *_a, **_k: browser})()
+    assert detect_browser_major(browser_type) == "149"
+    assert browser.closed

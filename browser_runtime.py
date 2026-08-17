@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 
-from browser_fingerprint import generate_browser_fingerprint
+from browser_fingerprint import detect_browser_major, generate_browser_fingerprint
 
 
 class _ProbeHandler(BaseHTTPRequestHandler):
@@ -62,10 +62,11 @@ def smoke_browser_runtime() -> dict[str, Any]:
         sync_playwright() as playwright,
         _local_probe_url() as probe_url,
     ):
+        browser_major = detect_browser_major(playwright.chromium)
         context = playwright.chromium.launch_persistent_context(
             profile,
             headless=True,
-            **fingerprint.context_options(playwright.chromium.executable_path),
+            **fingerprint.context_options(browser_major),
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()

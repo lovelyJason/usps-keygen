@@ -4,10 +4,8 @@ import json
 import re
 import secrets
 import string
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from functools import lru_cache
 
 VIEWPORTS = ((1366, 768), (1440, 900), (1536, 864), (1600, 900), (1920, 1080))
 US_TIMEZONES = (
@@ -33,7 +31,7 @@ class BrowserFingerprint:
     def summary(self) -> str:
         return f"{self.fingerprint_id} · Chromium 原生 · Win10"
 
-    def context_options(self, browser_executable: str | None = None) -> dict:
+    def context_options(self, browser_major: str | None = None) -> dict:
         options = {
             "channel": "chromium",
             "viewport": {"width": self.width, "height": self.height},
@@ -47,7 +45,7 @@ class BrowserFingerprint:
             "has_touch": False,
             "is_mobile": False,
         }
-        user_agent = runtime_user_agent(browser_executable)
+        user_agent = runtime_user_agent(browser_major)
         if user_agent:
             options["user_agent"] = user_agent
         return options
@@ -82,26 +80,18 @@ def _random_id(length: int = 10) -> str:
     return "fp-" + "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-@lru_cache(maxsize=8)
-def runtime_user_agent(
-    browser_executable: str | None, platform_name: str | None = None
-) -> str | None:
-    if not browser_executable:
-        return None
+def detect_browser_major(browser_type) -> str | None:
+    browser = browser_type.launch(channel="chromium", headless=True)
     try:
-        result = subprocess.run(
-            [browser_executable, "--version"],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
+        match = re.match(r"(\d{2,3})\.", browser.version)
+        return match.group(1) if match else None
+    finally:
+        browser.close()
+
+
+def runtime_user_agent(browser_major: str | None, platform_name: str | None = None) -> str | None:
+    if not browser_major:
         return None
-    match = re.search(r"\b(\d{2,3})\.\d+\.\d+\.\d+\b", result.stdout)
-    if not match:
-        return None
-    major = match.group(1)
     platform_name = platform_name or sys.platform
     if platform_name == "win32":
         platform_token = "Windows NT 10.0; Win64; x64"
@@ -111,5 +101,5 @@ def runtime_user_agent(
         platform_token = "X11; Linux x86_64"
     return (
         f"Mozilla/5.0 ({platform_token}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        f"(KHTML, like Gecko) Chrome/{browser_major}.0.0.0 Safari/537.36"
     )

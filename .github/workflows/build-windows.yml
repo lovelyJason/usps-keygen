@@ -77,9 +77,14 @@ jobs:
           if (-not (Test-Path "dist\$env:DIST_NAME\playwright-browsers")) {
             throw "Bundled Chromium is missing"
           }
-          $process = Start-Process -FilePath $exe -ArgumentList "--browser-smoke" `
-            -PassThru -Wait
+          $process = Start-Process -FilePath $exe -ArgumentList "--browser-smoke" -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Packaged browser runtime smoke test timed out"
+          }
           if ($process.ExitCode -ne 0) {
+            $errorLog = "dist\$env:DIST_NAME\browser-smoke-error.txt"
+            if (Test-Path $errorLog) { Get-Content $errorLog }
             throw "Packaged browser runtime smoke test failed with exit code $($process.ExitCode)"
           }
 
