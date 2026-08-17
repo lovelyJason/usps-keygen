@@ -12,6 +12,12 @@ class RegistrationFlowError(RuntimeError):
         self.stage = stage
 
 
+def require_mailbox(mailbox):
+    if mailbox is None:
+        raise RegistrationFlowError("mail", "自动邮箱服务未初始化")
+    return mailbox
+
+
 def otp_selectors() -> tuple[str, ...]:
     return (
         "input[autocomplete='one-time-code']",

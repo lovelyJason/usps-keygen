@@ -20,6 +20,7 @@ class BatchWorker(QThread):
     row_result = Signal(int, object)
     row_email_changed = Signal(int, str)
     row_fingerprint_changed = Signal(int, str)
+    row_verification_required = Signal(int)
     log = Signal(str)
     batch_done = Signal()
 
@@ -40,6 +41,7 @@ class BatchWorker(QThread):
         failure_hold_seconds: int = 30,
         execution_mode: str = "sequential",
         worker_count: int = 1,
+        manual_mailbox_takeover: bool = False,
     ):
         super().__init__()
         self.items = items
@@ -57,6 +59,7 @@ class BatchWorker(QThread):
         self.failure_hold_seconds = failure_hold_seconds
         self.execution_mode = execution_mode if execution_mode == "concurrent" else "sequential"
         self.worker_count = max(1, min(worker_count, MAX_BATCH_WORKERS))
+        self.manual_mailbox_takeover = manual_mailbox_takeover
         self.stop_event = Event()
         self.results: dict[int, RegistrationResult] = {}
         self._checkpoint_lock = threading.Lock()
@@ -72,19 +75,46 @@ class BatchWorker(QThread):
             self.row_fingerprint_changed.emit(index, fingerprint_summary(data.browser_fingerprint))
             if attempt < 2:
                 return
+            if self.manual_mailbox_takeover:
+                return
             data.email = retry_mailbox_address(original_emails[index], attempt)
             self.row_email_changed.emit(index, data.email)
 
         def run_one(data: RegistrationData) -> RegistrationResult:
-            mailbox = MailboxClient(self.mailbox_base_url, self.mailbox_token)
+            index = next(index for index, item in self.items if item is data)
+            mailbox = (
+                None
+                if self.manual_mailbox_takeover
+                else MailboxClient(self.mailbox_base_url, self.mailbox_token)
+            )
             config = AutomationConfig(
                 headless=self.headless,
                 mailbox_timeout_seconds=self.mailbox_timeout_seconds,
                 mailbox_poll_seconds=self.poll_seconds,
                 artifact_dir=self.artifact_dir,
                 failure_hold_seconds=self.failure_hold_seconds,
+                manual_mailbox_takeover=self.manual_mailbox_takeover,
             )
             runner = UspsRegistrationRunner(config)
+
+            def request_verification() -> None:
+                with self._checkpoint_lock:
+                    self.checkpoint_results[index] = RegistrationResult(
+                        "running", "manual_verification", "等待输入验证码"
+                    )
+                    save_checkpoint(
+                        self.checkpoint_path, self.checkpoint_rows, self.checkpoint_results
+                    )
+                self.row_verification_required.emit(index)
+
+            if self.manual_mailbox_takeover:
+                return runner.run(
+                    data,
+                    mailbox,
+                    self.stop_event,
+                    self.log.emit,
+                    request_verification,
+                )
             return runner.run(data, mailbox, self.stop_event, self.log.emit)
 
         def record_attempt(index: int, attempt: int, total: int) -> None:

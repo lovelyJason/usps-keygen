@@ -1,4 +1,4 @@
-# USPS 批量注册助手 v2.1.0
+# USPS 批量注册助手 v2.2.2
 
 这是一个 PySide6 + Playwright 桌面工具，用 CSV 管理多条 USPS 注册任务，并接入
 `velydora-mail-otp` 自动完成邮箱验证。
@@ -11,6 +11,7 @@
 - 空邮箱自动生成唯一的 `@velydora.com` 地址
 - 自动邮箱使用纯随机字母数字，不包含业务名、日期或批次号
 - 自动等待数字验证码或 USPS 一次性邮箱验证链接
+- 默认支持人工接管邮箱，逐行填写邮箱并在醒目等待状态下输入验证码
 - CSV 最后一列记录状态，默认跳过失败项，并在重启时自动加载上次 CSV
 - 每条任务和每次重试使用全新临时浏览器 profile 与随机浏览器指纹
 - 自动填写 USPS 账号、地址、联系人和安全问题
@@ -24,10 +25,10 @@ USPS 的 CAPTCHA、身份核验拒绝、限流和服务故障会显示为真实�
 仓库推送到 `main` 后，GitHub Actions 会自动执行 Ruff、完整测试和 Windows 打包。
 
 构建完成后，在仓库的 Actions 页面打开最新一次 `Build Windows EXE`，下载
-`USPSBatchRegistration-v2.1.0-Windows-x64` Artifact。解压后运行：
+`USPSBatchRegistration-v2.2.2-Windows-x64` Artifact。解压后运行：
 
 ```text
-USPSBatchRegistration-v2.1.0-Windows-x64\USPSBatchRegistration-v2.1.0.exe
+USPSBatchRegistration-v2.2.2-Windows-x64\USPSBatchRegistration-v2.2.2.exe
 ```
 
 压缩包已包含 Playwright Chromium，无需另外安装浏览器。也可以在 Actions 页面手动运行
@@ -57,15 +58,16 @@ python main.py
 
 ## 使用
 
-1. 在“API Token”处粘贴 Token，或用“载入 Token 文件”选择仅包含 Token 的文本文件。
-2. 点击“测试邮箱连接”。这个检查会访问需鉴权的邮件列表接口，错误 Token 无法通过。
-3. 点击“生成 CSV 模板”，填写每一行。`email` 留空会生成纯随机唯一邮箱。
+1. “是否接管邮箱”默认选中，此模式不会调用线上邮箱 API。
+2. 点击“生成 CSV 模板”并导入；双击表格“邮箱”列，为所选任务填写邮箱。
+3. 如需自动邮箱，取消“是否接管邮箱”，再填写 Token 并点击“测试邮箱连接”。
 4. 点击“导入 CSV”，确认表格中的邮箱、用户名和账号类型。
 5. 点击“导入代理 TXT”或把 TXT 拖入表格，代理按行顺序绑定。
 6. 选择顺序模式，或选择并发模式并设置 1-5 个独立浏览器线程。
 7. “后台浏览器（无头模式）”默认选中；排查 USPS 页面问题时取消勾选。
-8. 勾选任务并点击“开始所选”。单条失败不会中断其他任务。
-9. 点击“导出结果”。默认不导出密码、代理凭据和安全问题答案。
+8. 勾选任务并点击“开始所选”。人工模式下，任何已选行缺少邮箱都会显示 Toast 并阻止启动。
+9. 验证邮件发送后，对应验证码单元格会黄色高亮；双击输入验证码后自动继续。
+10. 点击“导出结果”。默认不导出密码、代理凭据和安全问题答案。
 
 运行中的邮箱地址和结果会保存到：
 
@@ -85,7 +87,7 @@ city,state,zip_code,phone,security_answer1,security_answer2,status
 ```
 
 - `account_type`：`Business Account` 或 `Personal Account`
-- `email`：可留空；手工填写时必须使用界面中配置的邮箱域名
+- `email`：人工接管模式可留空后在表格填写任意有效邮箱；自动模式必须使用配置域名
 - `proxy`：可留空；支持 `host:port:user:password` 或带协议代理 URL
 - `company`：商业账号必填
 - `state`：两位州缩写，例如 `FL`
@@ -95,7 +97,7 @@ city,state,zip_code,phone,security_answer1,security_answer2,status
 
 模板第二行是格式示例，地址和恢复答案必须替换后再运行。
 
-自动或手工重试会切换到同域名下的新邮箱地址，避免上一尝试的延迟邮件被复用。最终提交或 OTP 提交结果不确定时，任务会要求人工核对，不会自动重放注册。
+自动邮箱模式重试会切换到同域名下的新邮箱地址，避免上一尝试的延迟邮件被复用。人工接管模式始终保留用户填写的邮箱。最终提交或 OTP 提交结果不确定时，任务会要求人工核对，不会自动重放注册。
 
 ## 测试
 

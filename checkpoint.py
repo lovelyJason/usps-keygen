@@ -66,6 +66,29 @@ def checkpoint_has_unfinished(path: str | Path) -> bool:
     return any(result.status != "success" for result in results)
 
 
+def restore_previous_session(window, checkpoint_path: Path, last_csv_path_key: str) -> None:
+    csv_path = str(window.settings.value(last_csv_path_key, "") or "").strip()
+    if checkpoint_path.exists():
+        try:
+            window.rows, window.results = load_checkpoint(checkpoint_path)
+        except Exception as exc:
+            window.log_view.append(f"上次表格检查点恢复失败：{exc}")
+        else:
+            window.current_csv_path = (
+                Path(csv_path) if csv_path and Path(csv_path).is_file() else None
+            )
+            window._render_rows()
+            window._set_running(False)
+            window.log_view.append(f"已恢复上次表格 {len(window.rows)} 条注册数据。")
+            return
+    if not csv_path:
+        return
+    if not Path(csv_path).is_file():
+        window.log_view.append(f"上次 CSV 路径已不存在：{csv_path}")
+        return
+    window._load_csv_path(csv_path, startup=True)
+
+
 def clear_private_data(checkpoint_path: Path, artifact_dir: Path) -> bool:
     try:
         if artifact_dir.exists():

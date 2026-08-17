@@ -38,6 +38,7 @@ def load_registration_csv(
     mailbox_domain: str,
     mailbox_prefix: str = "usps",
     batch_id: str | None = None,
+    manual_mailbox_takeover: bool = False,
 ) -> list[RegistrationData]:
     rows, _skipped = load_registration_csv_with_stats(
         path,
@@ -45,6 +46,7 @@ def load_registration_csv(
         mailbox_prefix,
         batch_id,
         skip_failed=False,
+        manual_mailbox_takeover=manual_mailbox_takeover,
     )
     return rows
 
@@ -55,6 +57,7 @@ def load_registration_csv_with_stats(
     mailbox_prefix: str = "usps",
     batch_id: str | None = None,
     skip_failed: bool = True,
+    manual_mailbox_takeover: bool = False,
 ) -> tuple[list[RegistrationData], int]:
     domain = _clean_domain(mailbox_domain)
     rows: list[RegistrationData] = []
@@ -79,7 +82,7 @@ def load_registration_csv_with_stats(
                 continue
             values = {field: str(source.get(field, "") or "").strip() for field in CSV_FIELDS}
             values["account_type"] = values["account_type"] or ACCOUNT_TYPES[0]
-            if not values["email"]:
+            if not values["email"] and not manual_mailbox_takeover:
                 values["email"] = _new_random_email(domain, emails)
             data = RegistrationData(**values)
             if data.proxy:
@@ -89,17 +92,21 @@ def load_registration_csv_with_stats(
                     raise ValueError(f"第 {row_number} 行代理格式错误：{exc}") from exc
             key = data.username.casefold()
             email_key = data.email.casefold()
-            if data.email.rsplit("@", 1)[-1].casefold() != domain:
+            if (
+                not manual_mailbox_takeover
+                and data.email.rsplit("@", 1)[-1].casefold() != domain
+            ):
                 raise ValueError(f"第 {row_number} 行邮箱必须使用已配置的 {domain} 域名")
             if key in usernames:
                 raise ValueError(f"第 {row_number} 行重复用户名：{data.username}")
             if email_key in emails:
                 raise ValueError(f"第 {row_number} 行重复邮箱：{data.email}")
-            errors = validate_data(data)
+            errors = validate_data(data, require_email=not manual_mailbox_takeover)
             if errors:
                 raise ValueError(f"第 {row_number} 行校验失败：{'；'.join(errors)}")
             usernames.add(key)
-            emails.add(email_key)
+            if email_key:
+                emails.add(email_key)
             rows.append(data)
 
     if source_count == 0:
@@ -209,7 +216,7 @@ def materialize_csv_emails(path: str | Path, data_rows: list[RegistrationData]) 
     changed = False
     for row in rows:
         data = by_username.get(str(row.get("username") or "").strip())
-        if data and not str(row.get("email") or "").strip():
+        if data and str(row.get("email") or "").strip() != data.email:
             row["email"] = data.email
             changed = True
     if not changed and reader.fieldnames == fieldnames:

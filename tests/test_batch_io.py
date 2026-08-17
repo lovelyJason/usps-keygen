@@ -71,6 +71,25 @@ def test_csv_import_rejects_email_outside_configured_mailbox_domain(tmp_path):
         raise AssertionError("external mailbox should fail")
 
 
+def test_manual_mailbox_import_keeps_blank_and_external_addresses(tmp_path):
+    source = tmp_path / "manual.csv"
+    source.write_text(
+        "account_type,email,username,password,first_name,last_name,address1,city,state,"
+        "zip_code,phone,security_answer1,security_answer2\n"
+        "Personal Account,,blank,ValidPass123,A,B,1 Main,Austin,TX,78701,"
+        "5125550100,X,Y\n"
+        "Personal Account,user@example.com,external,ValidPass123,C,D,2 Main,Austin,TX,"
+        "78701,5125550101,X,Z\n",
+        encoding="utf-8",
+    )
+
+    rows = load_registration_csv(
+        source, mailbox_domain="velydora.com", manual_mailbox_takeover=True
+    )
+
+    assert [row.email for row in rows] == ["", "user@example.com"]
+
+
 def test_result_export_contains_per_row_outcome(tmp_path):
     target = tmp_path / "results.csv"
     rows = load_registration_csv(

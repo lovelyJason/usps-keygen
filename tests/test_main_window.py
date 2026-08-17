@@ -9,7 +9,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import main
-from main import PROXY_COLUMN, MainWindow
+import manual_mailbox_ui
+from main import EMAIL_COLUMN, PROXY_COLUMN, MainWindow
+from manual_mailbox_ui import VERIFICATION_COLUMN
 from models import RegistrationData, RegistrationResult
 from retry_policy import rotate_manual_retry_addresses, runnable_indices
 
@@ -56,6 +58,7 @@ def test_start_preflights_authenticated_mailbox_access(monkeypatch, tmp_path):
     window = MainWindow()
     window.rows = [RegistrationData(username="user", email="a@b.com")]
     window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window.manual_mailbox_takeover.setChecked(False)
     verified = []
 
     class Mailbox:
@@ -99,6 +102,7 @@ def test_failed_startup_restores_start_button(monkeypatch):
     window = MainWindow()
     window.rows = [RegistrationData(username="user", email="a@b.com")]
     window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window.manual_mailbox_takeover.setChecked(False)
     window._set_running(False)
 
     class Mailbox:
@@ -124,6 +128,7 @@ def test_start_is_visually_disabled_before_preflight_and_reentrant_click_is_igno
     window = MainWindow()
     window.rows = [RegistrationData(username="user", email="a@b.com")]
     window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window.manual_mailbox_takeover.setChecked(False)
     window._render_rows()
     window._set_running(False)
     verified = []
@@ -288,13 +293,98 @@ def test_execution_mode_controls_have_hard_browser_limit():
     assert window.execution_mode.currentData() == "sequential"
     assert not window.worker_count.isEnabled()
     assert window.worker_count.maximum() == 5
-    assert "v2.1.0" in window.windowTitle()
+    assert "v2.2.2" in window.windowTitle()
     assert window.skip_failed.isChecked()
     assert window.headless.isChecked()
+    assert window.manual_mailbox_takeover.isChecked()
 
     window.execution_mode.setCurrentIndex(1)
     assert window.execution_mode.currentData() == "concurrent"
     assert window.worker_count.isEnabled()
+    window.close()
+
+
+def test_default_manual_mailbox_layout_is_compact_and_keeps_table_space():
+    app()
+    window = MainWindow()
+    window.show()
+    QApplication.processEvents()
+
+    manual_height = window.settings_box.sizeHint().height()
+    assert window.manual_mailbox_takeover.isChecked()
+    assert window.mailbox_panel.isHidden()
+    assert manual_height <= 120
+    assert window.table.minimumHeight() >= 280
+
+    window.manual_mailbox_takeover.setChecked(False)
+    QApplication.processEvents()
+    assert not window.mailbox_panel.isHidden()
+    assert window.settings_box.sizeHint().height() > manual_height
+    window.close()
+
+
+def test_manual_mailbox_start_rejects_selected_row_without_email(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="missing-email", email="")]
+    window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window._render_rows()
+    window._set_running(False)
+    messages = []
+    monkeypatch.setattr(window, "_show_toast", lambda message, **_kwargs: messages.append(message))
+
+    window.start_all()
+
+    assert messages == ["所选任务第 1 行未填写邮箱"]
+    assert window.worker is None
+    assert window.start_button.isEnabled()
+    window.close()
+
+
+def test_manual_verification_row_is_highlighted_and_accepts_code(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="manual", email="manual@example.com")]
+    window.results = [RegistrationResult("running", "browser_start", "running")]
+    window._render_rows()
+    monkeypatch.setattr(window, "_show_toast", lambda *_args, **_kwargs: None)
+
+    window.on_row_verification_required(0)
+
+    assert window.results[0].stage == "manual_verification"
+    assert window.table.item(0, VERIFICATION_COLUMN).text() == "双击输入验证码"
+    assert window.table.item(0, VERIFICATION_COLUMN).font().bold()
+
+    monkeypatch.setattr(
+        manual_mailbox_ui.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("483920", True),
+    )
+    window._on_table_cell_double_clicked(0, VERIFICATION_COLUMN)
+
+    assert window.rows[0].verification_code == "483920"
+    assert window.table.item(0, VERIFICATION_COLUMN).text() == "483920"
+    assert window.results[0].message == "验证码已输入，正在继续"
+    window.close()
+
+
+def test_manual_email_is_edited_from_double_click_dialog(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="manual", email="")]
+    window.results = [RegistrationResult("pending", "queued", "waiting")]
+    window._render_rows()
+    monkeypatch.setattr(
+        manual_mailbox_ui.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("customer@example.com", True),
+    )
+    monkeypatch.setattr(window, "_save_checkpoint", lambda: None)
+
+    window._on_table_cell_double_clicked(0, EMAIL_COLUMN)
+
+    assert window.rows[0].email == "customer@example.com"
+    assert window.table.item(0, EMAIL_COLUMN).text() == "customer@example.com"
     window.close()
 
 
@@ -374,6 +464,99 @@ def test_last_csv_path_is_automatically_restored(monkeypatch, tmp_path):
     assert [row.username for row in window.rows] == ["ready-user"]
     assert window.current_csv_path == source
     assert "跳过失败项 1 条" in window.log_view.toPlainText()
+    window.close()
+
+
+def test_startup_restores_failed_rows_from_checkpoint_before_skip_filter(monkeypatch, tmp_path):
+    source = tmp_path / "last.csv"
+    source.write_text(
+        "account_type,email,username,password,first_name,last_name,address1,city,state,"
+        "zip_code,phone,security_answer1,security_answer2,status\n"
+        "Personal Account,failed@example.com,failed-user,ValidPass123,A,B,1 Main,Austin,"
+        "TX,78701,5125550100,X,Y,failed\n",
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    saved_row = RegistrationData(
+        account_type="Personal Account",
+        email="failed@example.com",
+        username="failed-user",
+    )
+    main.checkpoint.save_checkpoint(
+        checkpoint_path,
+        [saved_row],
+        [RegistrationResult.failed("identity_verification", "rejected")],
+    )
+    stored = {main.LAST_CSV_PATH_KEY: str(source)}
+
+    class Settings:
+        def __init__(self, *_args):
+            pass
+
+        def value(self, key, default=""):
+            return stored.get(key, default)
+
+        def setValue(self, key, value):
+            stored[key] = value
+
+        def remove(self, key):
+            stored.pop(key, None)
+
+        def sync(self):
+            pass
+
+    monkeypatch.setattr(main, "QSettings", Settings)
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.delenv("USPS_DISABLE_AUTO_RESTORE", raising=False)
+
+    window = MainWindow()
+
+    assert window.skip_failed.isChecked()
+    assert [row.username for row in window.rows] == ["failed-user"]
+    assert window.results[0].status == "failed"
+    assert window.current_csv_path == source
+    assert "已恢复上次表格 1 条注册数据" in window.log_view.toPlainText()
+    assert "跳过失败项" not in window.log_view.toPlainText()
+    window.close()
+
+
+def test_corrupt_checkpoint_falls_back_to_last_csv(monkeypatch, tmp_path):
+    source = tmp_path / "last.csv"
+    source.write_text(
+        "account_type,email,username,password,first_name,last_name,address1,city,state,"
+        "zip_code,phone,security_answer1,security_answer2,status\n"
+        "Personal Account,ready@example.com,ready-user,ValidPass123,A,B,1 Main,Austin,"
+        "TX,78701,5125550100,X,Y,\n",
+        encoding="utf-8",
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text("broken", encoding="utf-8")
+    stored = {main.LAST_CSV_PATH_KEY: str(source)}
+
+    class Settings:
+        def __init__(self, *_args):
+            pass
+
+        def value(self, key, default=""):
+            return stored.get(key, default)
+
+        def setValue(self, key, value):
+            stored[key] = value
+
+        def remove(self, key):
+            stored.pop(key, None)
+
+        def sync(self):
+            pass
+
+    monkeypatch.setattr(main, "QSettings", Settings)
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.delenv("USPS_DISABLE_AUTO_RESTORE", raising=False)
+
+    window = MainWindow()
+
+    assert [row.username for row in window.rows] == ["ready-user"]
+    assert "上次表格检查点恢复失败" in window.log_view.toPlainText()
     window.close()
 
 

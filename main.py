@@ -9,15 +9,11 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QFileDialog,
-    QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -29,7 +25,6 @@ from PySide6.QtWidgets import (
 )
 
 import checkpoint
-from batch_engine import MAX_BATCH_WORKERS
 from batch_io import (
     export_results,
     load_registration_csv_with_stats,
@@ -40,28 +35,25 @@ from batch_io import (
 from batch_worker import BatchWorker
 from browser_fingerprint import fingerprint_summary
 from mailbox_client import MailboxClient
+from manual_mailbox_ui import EMAIL_COLUMN, TOKEN_SETTINGS_KEY, ManualMailboxUiMixin
 from models import RegistrationData, RegistrationResult
 from proxy_io import load_proxy_file, proxy_display
 from retry_policy import rotate_manual_retry_addresses, runnable_indices
-from ui_controls import CheckBoxHeader, ProxyDropTable, make_spin
-from ui_style import APP_STYLE
+from ui_controls import CheckBoxHeader, ProxyDropTable
 from version import APP_TITLE, WORKBENCH_TITLE
 
-DEFAULT_MAILBOX_URL = "https://velydora-mail-otp.hzj1248394650.workers.dev"
 ARTIFACT_DIR = Path.home() / ".usps-registration-mvp" / "run-artifacts"
 CHECKPOINT_PATH = Path.home() / ".usps-registration-mvp" / "batch-checkpoint.json"
 SELECT_COLUMN = 0
-EMAIL_COLUMN = 3
-PROXY_COLUMN = 4
-FINGERPRINT_COLUMN = 5
-STATUS_COLUMN = 8
-STAGE_COLUMN = 9
-MESSAGE_COLUMN = 10
-TOKEN_SETTINGS_KEY = "mailbox/api_token"
+PROXY_COLUMN = 5
+FINGERPRINT_COLUMN = 6
+STATUS_COLUMN = 9
+STAGE_COLUMN = 10
+MESSAGE_COLUMN = 11
 LAST_CSV_PATH_KEY = "files/last_csv_path"
 
 
-class MainWindow(QMainWindow):
+class MainWindow(ManualMailboxUiMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -69,6 +61,7 @@ class MainWindow(QMainWindow):
         self.rows: list[RegistrationData] = []
         self.results: list[RegistrationResult] = []
         self.worker: BatchWorker | None = None
+        self._is_running = False
         self._launch_in_progress = False
         self.pending_proxies: list[str] = []
         self.current_csv_path: Path | None = None
@@ -77,8 +70,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(7)
 
         title = QLabel(WORKBENCH_TITLE)
         title.setObjectName("pageTitle")
@@ -89,7 +82,7 @@ class MainWindow(QMainWindow):
         root.addWidget(QLabel("运行日志"))
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(160)
+        self.log_view.setMaximumHeight(105)
         root.addWidget(self.log_view)
 
         self.status_label = QLabel("尚未导入数据")
@@ -97,81 +90,7 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self._apply_style()
         if os.getenv("USPS_DISABLE_AUTO_RESTORE") != "1":
-            self._restore_last_csv()
-
-    def _build_settings(self) -> QGroupBox:
-        box = QGroupBox("邮箱与执行设置")
-        grid = QGridLayout(box)
-
-        self.mailbox_url = QLineEdit(DEFAULT_MAILBOX_URL)
-        saved_token = str(self.settings.value(TOKEN_SETTINGS_KEY, "") or "")
-        self.mailbox_token = QLineEdit(os.getenv("VELYDORA_API_TOKEN", saved_token))
-        self.mailbox_token.setEchoMode(QLineEdit.Password)
-        self.mailbox_token.setPlaceholderText("Bearer Token，失去焦点后自动保存")
-        self.mailbox_token.editingFinished.connect(self._persist_mailbox_token)
-        self.mailbox_domain = QLineEdit("velydora.com")
-
-        grid.addWidget(QLabel("邮箱 API"), 0, 0)
-        grid.addWidget(self.mailbox_url, 0, 1, 1, 3)
-        grid.addWidget(QLabel("API Token"), 1, 0)
-        grid.addWidget(self.mailbox_token, 1, 1, 1, 2)
-        self.load_token_button = QPushButton("载入 Token 文件")
-        self.load_token_button.clicked.connect(self.load_token_file)
-        grid.addWidget(self.load_token_button, 1, 3)
-        grid.addWidget(QLabel("邮箱域名"), 2, 0)
-        grid.addWidget(self.mailbox_domain, 2, 1, 1, 3)
-
-        execution_controls = QHBoxLayout()
-        self.execution_mode = QComboBox()
-        self.execution_mode.addItem("顺序模式", "sequential")
-        self.execution_mode.addItem("并发模式", "concurrent")
-        self.execution_mode.currentIndexChanged.connect(self._on_execution_mode_changed)
-        self.worker_count = make_spin(1, MAX_BATCH_WORKERS, 2, " 个")
-        self.worker_count.setEnabled(False)
-        self.worker_count.setToolTip(
-            f"并发模式下同时运行的独立浏览器数量，硬上限 {MAX_BATCH_WORKERS}"
-        )
-        execution_fields = (
-            ("执行模式", self.execution_mode),
-            ("浏览器线程", self.worker_count),
-        )
-        for label, control in execution_fields:
-            form = QFormLayout()
-            form.addRow(label, control)
-            execution_controls.addLayout(form)
-        execution_controls.addStretch()
-        grid.addLayout(execution_controls, 3, 0, 1, 4)
-
-        controls = QHBoxLayout()
-        self.mail_timeout = make_spin(30, 600, 180, " 秒")
-        self.poll_interval = make_spin(1, 30, 3, " 秒")
-        self.row_delay = make_spin(0, 300, 5, " 秒")
-        self.retry_count = make_spin(0, 3, 1, " 次")
-        self.failure_hold = make_spin(0, 300, 30, " 秒")
-        self.headless = QCheckBox("后台浏览器（无头模式）")
-        self.headless.setChecked(True)
-        self.headless.setToolTip("勾选后不显示 Chromium 窗口；排查页面问题时取消勾选")
-        for label, control in (
-            ("邮件超时", self.mail_timeout),
-            ("轮询间隔", self.poll_interval),
-            ("行间延迟", self.row_delay),
-            ("额外重试", self.retry_count),
-            ("失败停留", self.failure_hold),
-        ):
-            form = QFormLayout()
-            form.addRow(label, control)
-            controls.addLayout(form)
-        controls.addWidget(self.headless)
-        controls.addStretch()
-        self.test_mail_button = QPushButton("测试邮箱连接")
-        self.test_mail_button.clicked.connect(self.test_mail_connection)
-        controls.addWidget(self.test_mail_button)
-        grid.addLayout(controls, 4, 0, 1, 4)
-        return box
-
-    def _on_execution_mode_changed(self) -> None:
-        concurrent = self.execution_mode.currentData() == "concurrent"
-        self.worker_count.setEnabled(concurrent and self.worker is None)
+            checkpoint.restore_previous_session(self, CHECKPOINT_PATH, LAST_CSV_PATH_KEY)
 
     def _build_actions(self) -> QGroupBox:
         box = QGroupBox("批量任务")
@@ -218,13 +137,14 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_table(self) -> QTableWidget:
-        table = ProxyDropTable(0, 11)
+        table = ProxyDropTable(0, 12)
         table.setHorizontalHeaderLabels(
             [
                 "",
                 "序号",
                 "账号类型",
                 "邮箱",
+                "验证码",
                 "代理 IP",
                 "浏览器指纹",
                 "用户名",
@@ -238,15 +158,17 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setAlternatingRowColors(True)
+        table.setMinimumHeight(280)
         header = CheckBoxHeader(Qt.Orientation.Horizontal, table)
         table.setHorizontalHeader(header)
         self.selection_header = header
         header.toggle_all_requested.connect(self._set_all_selected)
-        for column in (0, 1, 2, 4, 5, 6, 7, 8, 9):
+        for column in (0, 1, 2, 4, 5, 6, 7, 8, 9, 10):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
-        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        header.setSectionResizeMode(11, QHeaderView.Stretch)
         table.itemChanged.connect(self._on_table_item_changed)
+        table.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
         table.proxy_file_dropped.connect(self.load_proxy_path)
         self.table = table
         return table
@@ -308,6 +230,7 @@ class MainWindow(QMainWindow):
                 path,
                 mailbox_domain=self.mailbox_domain.text(),
                 skip_failed=self.skip_failed.isChecked(),
+                manual_mailbox_takeover=self.manual_mailbox_takeover.isChecked(),
             )
         except Exception as exc:
             if startup:
@@ -337,15 +260,6 @@ class MainWindow(QMainWindow):
         if skipped:
             message += f"，跳过失败项 {skipped} 条"
         self.log_view.append(message + "。")
-
-    def _restore_last_csv(self) -> None:
-        path = str(self.settings.value(LAST_CSV_PATH_KEY, "") or "").strip()
-        if not path:
-            return
-        if not Path(path).is_file():
-            self.log_view.append(f"上次 CSV 路径已不存在：{path}")
-            return
-        self._load_csv_path(path, startup=True)
 
     def import_proxy_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "导入代理 TXT", "", "Text files (*.txt)")
@@ -421,20 +335,23 @@ class MainWindow(QMainWindow):
             return
         if not indices or self.worker or self._launch_in_progress:
             return
+        if not self._manual_mailbox_preflight(indices):
+            return
         self._launch_in_progress = True
         self._set_running(True)
         self.start_button.repaint()
         QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-        try:
-            self._mailbox_client().verify_access()
-        except Exception as exc:
-            self._launch_in_progress = False
-            self._set_running(False)
-            QMessageBox.warning(self, "邮箱预检失败", str(exc))
-            return
-        for index, email in rotate_manual_retry_addresses(self.rows, self.results, indices):
-            self.table.item(index, EMAIL_COLUMN).setText(email)
-            self.log_view.append(f"{self.rows[index].username}: 已为重试切换邮箱地址。")
+        if not self.manual_mailbox_takeover.isChecked():
+            try:
+                self._mailbox_client().verify_access()
+            except Exception as exc:
+                self._launch_in_progress = False
+                self._set_running(False)
+                QMessageBox.warning(self, "邮箱预检失败", str(exc))
+                return
+            for index, email in rotate_manual_retry_addresses(self.rows, self.results, indices):
+                self.table.item(index, EMAIL_COLUMN).setText(email)
+                self.log_view.append(f"{self.rows[index].username}: 已为重试切换邮箱地址。")
         self._save_checkpoint()
         items = [(index, self.rows[index]) for index in indices]
         try:
@@ -454,6 +371,7 @@ class MainWindow(QMainWindow):
                 failure_hold_seconds=self.failure_hold.value(),
                 execution_mode=str(self.execution_mode.currentData()),
                 worker_count=self.worker_count.value(),
+                manual_mailbox_takeover=self.manual_mailbox_takeover.isChecked(),
             )
         except Exception as exc:
             self._launch_in_progress = False
@@ -464,6 +382,9 @@ class MainWindow(QMainWindow):
         self.worker.row_result.connect(self.on_row_result)
         self.worker.row_email_changed.connect(self.on_row_email_changed)
         self.worker.row_fingerprint_changed.connect(self.on_row_fingerprint_changed)
+        verification_signal = getattr(self.worker, "row_verification_required", None)
+        if verification_signal is not None:
+            verification_signal.connect(self.on_row_verification_required)
         self.worker.log.connect(self.log_view.append)
         self.worker.finished.connect(self.on_batch_finished)
         try:
@@ -587,6 +508,7 @@ class MainWindow(QMainWindow):
                 str(index + 1),
                 data.account_type.replace(" Account", ""),
                 data.email,
+                data.verification_code,
                 proxy_display(data.proxy),
                 fingerprint_summary(data.browser_fingerprint),
                 data.username,
@@ -720,6 +642,7 @@ class MainWindow(QMainWindow):
             self._save_checkpoint()
 
     def _set_running(self, running: bool) -> None:
+        self._is_running = running
         self.start_button.setEnabled(not running and bool(self.rows))
         self._set_selection_enabled(not running)
         self.stop_button.setEnabled(running)
@@ -731,10 +654,12 @@ class MainWindow(QMainWindow):
         self.clear_button.setEnabled(not running and bool(self.rows))
         self.export_button.setEnabled(not running and bool(self.rows))
         self.test_mail_button.setEnabled(not running)
+        self.manual_mailbox_takeover.setEnabled(not running)
         self.execution_mode.setEnabled(not running)
         self.worker_count.setEnabled(
             not running and self.execution_mode.currentData() == "concurrent"
         )
+        self._on_mailbox_mode_changed()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
@@ -750,10 +675,6 @@ class MainWindow(QMainWindow):
             self._merge_worker_results(worker)
             self.worker = None
         event.accept()
-
-    def _apply_style(self) -> None:
-        self.setStyleSheet(APP_STYLE)
-
 
 def main() -> int:
     if getattr(sys, "frozen", False):

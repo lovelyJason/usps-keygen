@@ -128,3 +128,42 @@ def test_retry_gets_a_fresh_browser_fingerprint(monkeypatch, tmp_path):
 
     assert len(fingerprints) == 2
     assert fingerprints[0] != fingerprints[1]
+
+
+def test_manual_mailbox_worker_skips_client_and_requests_verification(monkeypatch, tmp_path):
+    row = RegistrationData(username="manual-user", email="manual@example.com")
+    requested = []
+
+    class Runner:
+        def __init__(self, config):
+            assert config.manual_mailbox_takeover
+
+        def run(self, data, mailbox, _stop, _log, verification_required):
+            assert mailbox is None
+            verification_required()
+            data.verification_code = "483920"
+            return RegistrationResult.success("complete", "done")
+
+    monkeypatch.setattr(batch_worker, "UspsRegistrationRunner", Runner)
+    monkeypatch.setattr(batch_worker, "save_checkpoint", lambda *_args: None)
+    worker = BatchWorker(
+        items=[(0, row)],
+        mailbox_base_url="",
+        mailbox_token="",
+        mailbox_timeout_seconds=30,
+        poll_seconds=1,
+        delay_seconds=0,
+        retries=0,
+        headless=True,
+        artifact_dir=tmp_path,
+        checkpoint_path=tmp_path / "checkpoint.json",
+        all_rows=[row],
+        initial_results=[RegistrationResult("pending", "queued", "waiting")],
+        manual_mailbox_takeover=True,
+    )
+    worker.row_verification_required.connect(requested.append)
+
+    worker.run()
+
+    assert requested == [0]
+    assert worker.results[0].status == "success"

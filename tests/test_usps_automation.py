@@ -350,6 +350,24 @@ def test_terminal_timeout_becomes_manual_review_state():
     assert error.value.stage == "submission_unknown"
 
 
+def test_manual_verification_wait_uses_code_entered_by_ui_callback():
+    runner = UspsRegistrationRunner(
+        AutomationConfig(mailbox_timeout_seconds=1, mailbox_poll_seconds=0.01)
+    )
+    data = RegistrationData(email="manual@example.com", verification_code="stale")
+    requested = []
+
+    def request_code():
+        requested.append(True)
+        data.verification_code = "483920"
+
+    code = runner._wait_for_manual_verification_code(data, Event(), request_code)
+
+    assert code == "483920"
+    assert requested == [True]
+    assert runner.stage == "manual_verification"
+
+
 def test_otp_is_consumed_only_after_positive_usps_success():
     page = FakePage()
     consumed = []

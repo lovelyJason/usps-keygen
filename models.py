@@ -10,6 +10,7 @@ ACCOUNT_TYPES = ("Business Account", "Personal Account")
 class RegistrationData:
     account_type: str = "Business Account"
     email: str = ""
+    verification_code: str = ""
     proxy: str = ""
     browser_fingerprint: str = ""
     username: str = ""
@@ -55,10 +56,9 @@ class RegistrationResult:
         return asdict(self)
 
 
-def validate_data(data: RegistrationData) -> list[str]:
+def validate_data(data: RegistrationData, require_email: bool = True) -> list[str]:
     errors: list[str] = []
     required = {
-        "邮箱": data.email,
         "用户名": data.username,
         "密码": data.password,
         "名": data.first_name,
@@ -71,10 +71,12 @@ def validate_data(data: RegistrationData) -> list[str]:
         "安全问题答案 1": data.security_answer1,
         "安全问题答案 2": data.security_answer2,
     }
+    if require_email:
+        required["邮箱"] = data.email
     errors.extend(f"{name}不能为空" for name, value in required.items() if not value.strip())
     if data.account_type not in ACCOUNT_TYPES:
         errors.append("账号类型必须是 Business Account 或 Personal Account")
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", data.email):
+    if data.email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", data.email):
         errors.append("邮箱格式不正确")
     if not 8 <= len(data.password) <= 50:
         errors.append("密码长度必须为 8 到 50 位")
