@@ -4,6 +4,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("USPS_DISABLE_AUTO_RESTORE", "1")
 
+import pytest
 from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -290,17 +291,18 @@ def test_execution_mode_controls_have_hard_browser_limit():
     app()
     window = MainWindow()
 
-    assert window.execution_mode.currentData() == "sequential"
-    assert not window.worker_count.isEnabled()
+    assert window.execution_mode.currentData() == "concurrent"
+    assert window.worker_count.isEnabled()
     assert window.worker_count.maximum() == 5
-    assert "v2.2.2" in window.windowTitle()
+    assert window.failure_hold.value() == 10
+    assert "v2.2.3" in window.windowTitle()
     assert window.skip_failed.isChecked()
     assert window.headless.isChecked()
     assert window.manual_mailbox_takeover.isChecked()
 
-    window.execution_mode.setCurrentIndex(1)
-    assert window.execution_mode.currentData() == "concurrent"
-    assert window.worker_count.isEnabled()
+    window.execution_mode.setCurrentIndex(0)
+    assert window.execution_mode.currentData() == "sequential"
+    assert not window.worker_count.isEnabled()
     window.close()
 
 
@@ -352,19 +354,69 @@ def test_manual_verification_row_is_highlighted_and_accepts_code(monkeypatch):
     window.on_row_verification_required(0)
 
     assert window.results[0].stage == "manual_verification"
-    assert window.table.item(0, VERIFICATION_COLUMN).text() == "双击输入验证码"
+    assert window.table.item(0, VERIFICATION_COLUMN).text() == "双击粘贴验证内容"
     assert window.table.item(0, VERIFICATION_COLUMN).font().bold()
 
     monkeypatch.setattr(
         manual_mailbox_ui.QInputDialog,
-        "getText",
+        "getMultiLineText",
         lambda *_args, **_kwargs: ("483920", True),
     )
     window._on_table_cell_double_clicked(0, VERIFICATION_COLUMN)
 
     assert window.rows[0].verification_code == "483920"
     assert window.table.item(0, VERIFICATION_COLUMN).text() == "483920"
-    assert window.results[0].message == "验证码已输入，正在继续"
+    assert window.results[0].message == "验证内容已输入，正在继续"
+    window.close()
+
+
+def test_manual_verification_accepts_usps_link_without_exposing_token(monkeypatch):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="manual", email="manual@example.com")]
+    window.results = [RegistrationResult("running", "manual_verification", "waiting")]
+    window._render_rows()
+    link = "https://reg.usps.com/gateway/complete?etoken=test-token%3D%3D"
+    monkeypatch.setattr(window, "_show_toast", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manual_mailbox_ui.QInputDialog,
+        "getMultiLineText",
+        lambda *_args, **_kwargs: (link, True),
+    )
+
+    window._on_table_cell_double_clicked(0, VERIFICATION_COLUMN)
+
+    assert window.rows[0].verification_code == link
+    assert window.table.item(0, VERIFICATION_COLUMN).text() == "已输入验证链接"
+    assert "test-token" not in window.log_view.toPlainText()
+    window.close()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.com/gateway/complete?etoken=test-token",
+        "https://reg.usps.com/gateway/complete",
+    ],
+)
+def test_manual_verification_rejects_invalid_links(monkeypatch, value):
+    app()
+    window = MainWindow()
+    window.rows = [RegistrationData(username="manual", email="manual@example.com")]
+    window.results = [RegistrationResult("running", "manual_verification", "waiting")]
+    window._render_rows()
+    messages = []
+    monkeypatch.setattr(window, "_show_toast", lambda message, **_kwargs: messages.append(message))
+    monkeypatch.setattr(
+        manual_mailbox_ui.QInputDialog,
+        "getMultiLineText",
+        lambda *_args, **_kwargs: (value, True),
+    )
+
+    window._on_table_cell_double_clicked(0, VERIFICATION_COLUMN)
+
+    assert messages == ["请输入 4-10 位数字验证码，或有效的 USPS 验证链接"]
+    assert window.rows[0].verification_code == ""
     window.close()
 
 

@@ -1,4 +1,4 @@
-# USPS 批量注册助手 v2.2.2
+# USPS 批量注册助手 v2.2.3
 
 这是一个 PySide6 + Playwright 桌面工具，用 CSV 管理多条 USPS 注册任务，并接入
 `velydora-mail-otp` 自动完成邮箱验证。
@@ -11,7 +11,7 @@
 - 空邮箱自动生成唯一的 `@velydora.com` 地址
 - 自动邮箱使用纯随机字母数字，不包含业务名、日期或批次号
 - 自动等待数字验证码或 USPS 一次性邮箱验证链接
-- 默认支持人工接管邮箱，逐行填写邮箱并在醒目等待状态下输入验证码
+- 默认支持人工接管邮箱，逐行填写邮箱并在醒目等待状态下输入验证码或 USPS 验证链接
 - CSV 最后一列记录状态，默认跳过失败项，并在重启时自动加载上次 CSV
 - 每条任务和每次重试使用全新临时浏览器 profile 与随机浏览器指纹
 - 自动填写 USPS 账号、地址、联系人和安全问题
@@ -25,10 +25,10 @@ USPS 的 CAPTCHA、身份核验拒绝、限流和服务故障会显示为真实�
 仓库推送到 `main` 后，GitHub Actions 会自动执行 Ruff、完整测试和 Windows 打包。
 
 构建完成后，在仓库的 Actions 页面打开最新一次 `Build Windows EXE`，下载
-`USPSBatchRegistration-v2.2.2-Windows-x64` Artifact。解压后运行：
+`USPSBatchRegistration-v2.2.3-Windows-x64` Artifact。解压后运行：
 
 ```text
-USPSBatchRegistration-v2.2.2-Windows-x64\USPSBatchRegistration-v2.2.2.exe
+USPSBatchRegistration-v2.2.3-Windows-x64\USPSBatchRegistration-v2.2.3.exe
 ```
 
 压缩包已包含 Playwright Chromium，无需另外安装浏览器。也可以在 Actions 页面手动运行
@@ -63,10 +63,10 @@ python main.py
 3. 如需自动邮箱，取消“是否接管邮箱”，再填写 Token 并点击“测试邮箱连接”。
 4. 点击“导入 CSV”，确认表格中的邮箱、用户名和账号类型。
 5. 点击“导入代理 TXT”或把 TXT 拖入表格，代理按行顺序绑定。
-6. 选择顺序模式，或选择并发模式并设置 1-5 个独立浏览器线程。
+6. 默认使用并发模式，可设置 1-5 个独立浏览器线程；需要逐条执行时切换为顺序模式。
 7. “后台浏览器（无头模式）”默认选中；排查 USPS 页面问题时取消勾选。
 8. 勾选任务并点击“开始所选”。人工模式下，任何已选行缺少邮箱都会显示 Toast 并阻止启动。
-9. 验证邮件发送后，对应验证码单元格会黄色高亮；双击输入验证码后自动继续。
+9. 验证邮件发送后，对应验证内容单元格会黄色高亮；双击输入数字验证码或粘贴完整 USPS 验证链接后自动继续。
 10. 点击“导出结果”。默认不导出密码、代理凭据和安全问题答案。
 
 运行中的邮箱地址和结果会保存到：

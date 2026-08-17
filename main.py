@@ -144,7 +144,7 @@ class MainWindow(ManualMailboxUiMixin, QMainWindow):
                 "序号",
                 "账号类型",
                 "邮箱",
-                "验证码",
+                "验证码 / 验证链接",
                 "代理 IP",
                 "浏览器指纹",
                 "用户名",

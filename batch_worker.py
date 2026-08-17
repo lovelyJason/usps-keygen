@@ -38,8 +38,8 @@ class BatchWorker(QThread):
         checkpoint_path: Path,
         all_rows: list[RegistrationData],
         initial_results: list[RegistrationResult],
-        failure_hold_seconds: int = 30,
-        execution_mode: str = "sequential",
+        failure_hold_seconds: int = 10,
+        execution_mode: str = "concurrent",
         worker_count: int = 1,
         manual_mailbox_takeover: bool = False,
     ):

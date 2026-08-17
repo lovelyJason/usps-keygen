@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from browser_fingerprint import load_browser_fingerprint
 from mailbox_client import MailboxClient, MailboxError, VerificationMessage
-from manual_verification import wait_for_verification_code
+from manual_verification import ManualVerificationValue, wait_for_verification_value
 from models import RegistrationData, RegistrationResult
 from proxy_io import proxy_for_playwright
 from usps_helpers import (
@@ -41,7 +41,7 @@ class AutomationConfig:
     mailbox_poll_seconds: float = 3
     profile_root: Path = Path.home() / ".usps-registration-mvp" / "profiles"
     artifact_dir: Path | None = None
-    failure_hold_seconds: int = 30
+    failure_hold_seconds: int = 10
     manual_mailbox_takeover: bool = False
 
 
@@ -219,11 +219,11 @@ class UspsRegistrationRunner:
         self._wait_for_email_request(page)
 
         if self.config.manual_mailbox_takeover:
-            log(f"{data.username}: 已发送验证邮件，等待人工输入验证码")
-            code = self._wait_for_manual_verification_code(
+            log(f"{data.username}: 已发送验证邮件，等待人工输入验证内容")
+            message = self._wait_for_manual_verification_value(
                 data, stop_event, verification_required
             )
-            self._submit_otp_value(page, data, code, stop_event)
+            self._submit_verification(page, data, None, message, stop_event)
         else:
             self.stage = "mail"
             log(f"{data.username}: 已发送验证邮件，等待邮箱服务")
@@ -328,10 +328,10 @@ class UspsRegistrationRunner:
             )
         if state is PageState.WAITING_FOR_EMAIL or visible_otp_input(page):
             if self.config.manual_mailbox_takeover:
-                code = self._wait_for_manual_verification_code(
+                message = self._wait_for_manual_verification_value(
                     data, stop_event, verification_required
                 )
-                self._submit_otp_value(page, data, code, stop_event)
+                self._submit_verification(page, data, None, message, stop_event)
             else:
                 self.stage = "post_submit_mail"
                 verification = mailbox_client.poll_verification(
@@ -614,8 +614,8 @@ class UspsRegistrationRunner:
         self,
         page,
         data: RegistrationData,
-        mailbox: MailboxClient,
-        message: VerificationMessage,
+        mailbox: MailboxClient | None,
+        message: VerificationMessage | ManualVerificationValue,
         stop_event: Event | None,
     ) -> None:
         self._check_stop(stop_event)
@@ -624,7 +624,8 @@ class UspsRegistrationRunner:
             page.goto(message.value, wait_until="domcontentloaded")
             return
         self._submit_otp_value(page, data, message.value, stop_event)
-        self._consume_accepted_otp(mailbox, message, data.email)
+        if mailbox is not None:
+            self._consume_accepted_otp(mailbox, message, data.email)
 
     def _submit_otp_value(
         self,
@@ -657,15 +658,15 @@ class UspsRegistrationRunner:
             return
         raise RegistrationFlowError("email_verification", "页面没有可填写的验证码输入框")
 
-    def _wait_for_manual_verification_code(
+    def _wait_for_manual_verification_value(
         self,
         data: RegistrationData,
         stop_event: Event | None,
         verification_required: Callable[[], None] | None,
-    ) -> str:
+    ) -> ManualVerificationValue:
         self.stage = "manual_verification"
         try:
-            return wait_for_verification_code(
+            return wait_for_verification_value(
                 data,
                 self.config.mailbox_timeout_seconds,
                 self.config.mailbox_poll_seconds,

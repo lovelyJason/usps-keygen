@@ -3,6 +3,7 @@ from threading import Event
 import pytest
 
 from mailbox_client import MailboxError, VerificationMessage
+from manual_verification import ManualVerificationValue
 from models import RegistrationData
 from usps_automation import AutomationConfig, UspsRegistrationRunner
 from usps_helpers import RegistrationFlowError
@@ -278,6 +279,7 @@ class FakePage:
         self.company_visible = False
         self.stop_on_wait = None
         self.after_submit_body = "Your USPS.com account has been created successfully"
+        self.navigations = []
 
     def locator(self, selector):
         if selector == "#confirm-modal":
@@ -298,6 +300,10 @@ class FakePage:
     def wait_for_timeout(self, _milliseconds):
         if self.stop_on_wait:
             self.stop_on_wait.set()
+
+    def goto(self, url, wait_until=None):
+        self.navigations.append((url, wait_until))
+        self.url = url
 
     def title(self):
         return "USPS Registration"
@@ -361,11 +367,31 @@ def test_manual_verification_wait_uses_code_entered_by_ui_callback():
         requested.append(True)
         data.verification_code = "483920"
 
-    code = runner._wait_for_manual_verification_code(data, Event(), request_code)
+    message = runner._wait_for_manual_verification_value(data, Event(), request_code)
 
-    assert code == "483920"
+    assert message == ManualVerificationValue("otp", "483920")
+    assert data.verification_code == ""
     assert requested == [True]
     assert runner.stage == "manual_verification"
+
+
+def test_manual_verification_link_opens_in_current_page_and_clears_token():
+    runner = UspsRegistrationRunner(
+        AutomationConfig(mailbox_timeout_seconds=1, mailbox_poll_seconds=0.01)
+    )
+    page = FakePage()
+    data = RegistrationData(email="manual@example.com")
+    link = "https://reg.usps.com/gateway/complete?etoken=test-token%3D%3D"
+
+    def request_link():
+        data.verification_code = link
+
+    message = runner._wait_for_manual_verification_value(data, Event(), request_link)
+    runner._submit_verification(page, data, None, message, Event())
+
+    assert page.navigations == [(link, "domcontentloaded")]
+    assert data.verification_code == ""
+    assert runner.stage == "email_verification"
 
 
 def test_otp_is_consumed_only_after_positive_usps_success():

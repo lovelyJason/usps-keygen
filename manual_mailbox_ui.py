@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from batch_engine import MAX_BATCH_WORKERS
 from batch_io import materialize_csv_emails
+from manual_verification import verification_value_kind
 from models import RegistrationResult
 from ui_controls import make_spin
 from ui_style import APP_STYLE
@@ -51,17 +52,17 @@ class ManualMailboxUiMixin:
         self.test_mail_button = QPushButton("测试邮箱连接")
         self.test_mail_button.clicked.connect(self.test_mail_connection)
 
-        self.manual_mailbox_takeover = QCheckBox("接管邮箱（人工验证码）")
+        self.manual_mailbox_takeover = QCheckBox("接管邮箱（人工验证）")
         self.manual_mailbox_takeover.setChecked(True)
         self.manual_mailbox_takeover.setToolTip(
-            "勾选后不调用线上邮箱 API；每行使用人工邮箱并等待手动输入验证码"
+            "勾选后不调用线上邮箱 API；每行使用人工邮箱并等待手动输入验证码或验证链接"
         )
         self.execution_mode = QComboBox()
         self.execution_mode.addItem("顺序模式", "sequential")
         self.execution_mode.addItem("并发模式", "concurrent")
         self.execution_mode.currentIndexChanged.connect(self._on_execution_mode_changed)
         self.worker_count = make_spin(1, MAX_BATCH_WORKERS, 2, " 个")
-        self.worker_count.setEnabled(False)
+        self.execution_mode.setCurrentIndex(1)
         self.worker_count.setToolTip(
             f"并发模式下同时运行的独立浏览器数量，硬上限 {MAX_BATCH_WORKERS}"
         )
@@ -103,7 +104,7 @@ class ManualMailboxUiMixin:
         self.poll_interval = make_spin(1, 30, 3, " 秒")
         self.row_delay = make_spin(0, 300, 5, " 秒")
         self.retry_count = make_spin(0, 3, 1, " 次")
-        self.failure_hold = make_spin(0, 300, 30, " 秒")
+        self.failure_hold = make_spin(0, 300, 10, " 秒")
         tuning = QHBoxLayout()
         tuning.setSpacing(7)
         for label, control in (
@@ -165,13 +166,16 @@ class ManualMailboxUiMixin:
     def on_row_verification_required(self, index: int) -> None:
         self.rows[index].verification_code = ""
         self.results[index] = RegistrationResult(
-            "running", "manual_verification", "等待输入验证码"
+            "running", "manual_verification", "等待输入验证码或验证链接"
         )
         self._render_result(index)
-        self._set_verification_cell(index, "双击输入验证码", waiting=True)
+        self._set_verification_cell(index, "双击粘贴验证内容", waiting=True)
         self.table.scrollToItem(self.table.item(index, VERIFICATION_COLUMN))
-        self.log_view.append(f"{self.rows[index].username}: 验证码已发送，等待人工输入。")
-        self._show_toast(f"第 {index + 1} 行验证码已发送，请双击验证码列输入", error=False)
+        self.log_view.append(f"{self.rows[index].username}: 验证邮件已发送，等待人工输入。")
+        self._show_toast(
+            f"第 {index + 1} 行验证邮件已发送，请输入验证码或粘贴验证链接",
+            error=False,
+        )
 
     def _on_table_cell_double_clicked(self, row: int, column: int) -> None:
         if not self.manual_mailbox_takeover.isChecked():
@@ -179,7 +183,7 @@ class ManualMailboxUiMixin:
         if column == EMAIL_COLUMN:
             self._edit_manual_email(row)
         elif column == VERIFICATION_COLUMN:
-            self._edit_manual_verification_code(row)
+            self._edit_manual_verification_value(row)
 
     def _edit_manual_email(self, row: int) -> None:
         if self.worker is not None:
@@ -209,23 +213,29 @@ class ManualMailboxUiMixin:
                 self.log_view.append(f"CSV 邮箱回写失败：{exc}")
         self._save_checkpoint()
 
-    def _edit_manual_verification_code(self, row: int) -> None:
+    def _edit_manual_verification_value(self, row: int) -> None:
         result = self.results[row]
         if result.status != "running" or result.stage != "manual_verification":
-            self._show_toast("该任务尚未进入验证码输入阶段")
+            self._show_toast("该任务尚未进入人工验证阶段")
             return
-        value, accepted = QInputDialog.getText(self, "填写验证码", f"第 {row + 1} 行验证码")
+        value, accepted = QInputDialog.getMultiLineText(
+            self,
+            "填写验证内容",
+            f"第 {row + 1} 行：输入数字验证码，或粘贴 USPS 验证链接",
+        )
         if not accepted:
             return
         value = value.strip()
-        if not re.fullmatch(r"\d{4,10}", value):
-            self._show_toast("验证码必须是 4 到 10 位数字")
+        kind = verification_value_kind(value)
+        if kind is None:
+            self._show_toast("请输入 4-10 位数字验证码，或有效的 USPS 验证链接")
             return
         self.rows[row].verification_code = value
-        self.results[row].message = "验证码已输入，正在继续"
+        self.results[row].message = "验证内容已输入，正在继续"
         self._render_result(row)
-        self._set_verification_cell(row, value, accepted=True)
-        self.log_view.append(f"{self.rows[row].username}: 已输入验证码，继续执行。")
+        display = value if kind == "otp" else "已输入验证链接"
+        self._set_verification_cell(row, display, accepted=True)
+        self.log_view.append(f"{self.rows[row].username}: 已输入验证内容，继续执行。")
 
     def _set_verification_cell(
         self, row: int, text: str, waiting: bool = False, accepted: bool = False
