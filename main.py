@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -33,7 +35,7 @@ from batch_io import (
     write_template,
 )
 from batch_worker import BatchWorker
-from browser_fingerprint import fingerprint_summary
+from browser_fingerprint import BrowserFingerprint, fingerprint_summary
 from mailbox_client import MailboxClient
 from manual_mailbox_ui import EMAIL_COLUMN, TOKEN_SETTINGS_KEY, ManualMailboxUiMixin
 from models import RegistrationData, RegistrationResult
@@ -65,6 +67,7 @@ class MainWindow(ManualMailboxUiMixin, QMainWindow):
         self._launch_in_progress = False
         self.pending_proxies: list[str] = []
         self.current_csv_path: Path | None = None
+        self._fingerprint_clipboard = ""
         self.settings = QSettings("JasonHuang", "USPSBatchRegistration")
 
         central = QWidget()
@@ -169,6 +172,8 @@ class MainWindow(ManualMailboxUiMixin, QMainWindow):
         header.setSectionResizeMode(11, QHeaderView.Stretch)
         table.itemChanged.connect(self._on_table_item_changed)
         table.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_table_context_menu)
         table.proxy_file_dropped.connect(self.load_proxy_path)
         self.table = table
         return table
@@ -328,6 +333,50 @@ class MainWindow(ManualMailboxUiMixin, QMainWindow):
             QMessageBox.information(self, "无需重试", "勾选范围内没有可安全重试的任务。")
             return
         self._start_indices(indices)
+
+    def _show_table_context_menu(self, position) -> None:
+        index = self.table.indexAt(position)
+        if not index.isValid() or index.column() != FINGERPRINT_COLUMN:
+            return
+        self._fingerprint_context_menu(index.row()).exec(self.table.viewport().mapToGlobal(position))
+
+    def _fingerprint_context_menu(self, row: int) -> QMenu:
+        menu = QMenu(self)
+        copy_action = menu.addAction("复制指纹")
+        copy_action.setEnabled(bool(self.rows[row].browser_fingerprint.strip()))
+        copy_action.triggered.connect(lambda: self._copy_fingerprint(row))
+        paste_action = menu.addAction("粘贴指纹")
+        paste_action.setEnabled(not self._is_running and self._clipboard_fingerprint() is not None)
+        paste_action.triggered.connect(lambda: self._paste_fingerprint(row))
+        return menu
+
+    def _copy_fingerprint(self, row: int) -> None:
+        value = self.rows[row].browser_fingerprint.strip()
+        if not value:
+            return
+        self._fingerprint_clipboard = value
+        QApplication.clipboard().setText(value)
+        self.log_view.append(f"{self.rows[row].username}: 已复制浏览器指纹。")
+
+    def _paste_fingerprint(self, row: int) -> None:
+        fingerprint = self._clipboard_fingerprint()
+        if fingerprint is None:
+            return
+        self.rows[row].browser_fingerprint = fingerprint.serialized()
+        self.rows[row].fingerprint_locked = True
+        self.table.item(row, FINGERPRINT_COLUMN).setText(fingerprint.summary())
+        self.log_view.append(f"{self.rows[row].username}: 已粘贴并锁定浏览器指纹。")
+        self._save_checkpoint()
+
+    def _clipboard_fingerprint(self) -> BrowserFingerprint | None:
+        value = QApplication.clipboard().text().strip()
+        if not value or value != self._fingerprint_clipboard:
+            return None
+        try:
+            fingerprint = BrowserFingerprint(**json.loads(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return fingerprint
 
     def _start_indices(self, indices: list[int]) -> None:
         if not self.rows:

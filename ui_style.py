@@ -30,6 +30,14 @@ QPushButton#primaryButton:disabled {
 QPushButton:disabled {
     color: #8a939b; background: #eceff1; border-color: #c8ced3;
 }
+QMenu {
+    background: #ffffff; border: 1px solid #b8c0c7;
+}
+QMenu::item { padding: 6px 20px; }
+QMenu::item:selected { background: #e7f0f5; }
+QMenu::item:disabled {
+    color: #9aa3aa; background: #f1f3f4;
+}
 QLineEdit, QSpinBox, QTextEdit, QTableWidget {
     background: white; border: 1px solid #bfc7ce;
 }

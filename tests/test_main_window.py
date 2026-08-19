@@ -287,6 +287,39 @@ def test_api_token_is_persisted_on_focus_loss(monkeypatch):
     restored.close()
 
 
+def test_fingerprint_context_menu_copies_and_pastes_locked_value(monkeypatch, tmp_path):
+    app()
+    window = MainWindow()
+    value = (
+        '{"fingerprint_id":"known","width":1366,"height":768,'
+        '"timezone_id":"America/Chicago","device_scale_factor":1.0}'
+    )
+    window.rows = [
+        RegistrationData(username="source", browser_fingerprint=value),
+        RegistrationData(username="target"),
+    ]
+    window.results = [
+        RegistrationResult.success("complete", "done"),
+        RegistrationResult("failed", "mail", "timeout"),
+    ]
+    window._render_rows()
+    monkeypatch.setattr(main, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
+    QApplication.clipboard().clear()
+    empty_menu = window._fingerprint_context_menu(1)
+    assert not empty_menu.actions()[1].isEnabled()
+    QApplication.clipboard().setText(value)
+    stale_menu = window._fingerprint_context_menu(1)
+    assert not stale_menu.actions()[1].isEnabled()
+    window._copy_fingerprint(0)
+    target_menu = window._fingerprint_context_menu(1)
+    assert target_menu.actions()[1].isEnabled()
+    window._paste_fingerprint(1)
+
+    assert window.rows[1].browser_fingerprint == value
+    assert window.rows[1].fingerprint_locked is True
+    assert "known" in window.table.item(1, main.FINGERPRINT_COLUMN).text()
+    window.close()
+
 def test_execution_mode_controls_have_hard_browser_limit():
     app()
     window = MainWindow()
@@ -295,7 +328,7 @@ def test_execution_mode_controls_have_hard_browser_limit():
     assert window.worker_count.isEnabled()
     assert window.worker_count.maximum() == 5
     assert window.failure_hold.value() == 10
-    assert "v2.2.4" in window.windowTitle()
+    assert "v2.2.5" in window.windowTitle()
     assert window.skip_failed.isChecked()
     assert window.headless.isChecked()
     assert window.manual_mailbox_takeover.isChecked()

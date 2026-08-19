@@ -71,8 +71,11 @@ class BatchWorker(QThread):
         original_emails = {index: data.email for index, data in self.items}
 
         def prepare_attempt(index: int, data: RegistrationData, attempt: int) -> None:
-            data.browser_fingerprint = generate_browser_fingerprint().serialized()
-            self.row_fingerprint_changed.emit(index, fingerprint_summary(data.browser_fingerprint))
+            if not data.fingerprint_locked:
+                data.browser_fingerprint = generate_browser_fingerprint().serialized()
+                self.row_fingerprint_changed.emit(
+                    index, fingerprint_summary(data.browser_fingerprint)
+                )
             if attempt < 2:
                 return
             if self.manual_mailbox_takeover:

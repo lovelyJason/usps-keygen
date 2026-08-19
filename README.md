@@ -1,4 +1,4 @@
-# USPS 批量注册助手 v2.2.4
+# USPS 批量注册助手 v2.2.5
 
 这是一个 PySide6 + Patchright 桌面工具，用 CSV 管理多条 USPS 注册任务，并接入
 `velydora-mail-otp` 自动完成邮箱验证。
@@ -25,10 +25,10 @@ USPS 的 CAPTCHA、身份核验拒绝、限流和服务故障会显示为真实�
 仓库推送到 `main` 后，GitHub Actions 会自动执行 Ruff、完整测试和 Windows 打包。
 
 构建完成后，在仓库的 Actions 页面打开最新一次 `Build Windows EXE`，下载
-`USPSBatchRegistration-v2.2.4-Windows-x64` Artifact。解压后运行：
+`USPSBatchRegistration-v2.2.5-Windows-x64` Artifact。解压后运行：
 
 ```text
-USPSBatchRegistration-v2.2.4-Windows-x64\USPSBatchRegistration-v2.2.4.exe
+USPSBatchRegistration-v2.2.5-Windows-x64\USPSBatchRegistration-v2.2.5.exe
 ```
 
 压缩包已包含 Patchright Chromium，无需另外安装浏览器。也可以在 Actions 页面手动运行

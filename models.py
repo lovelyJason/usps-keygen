@@ -13,6 +13,7 @@ class RegistrationData:
     verification_code: str = ""
     proxy: str = ""
     browser_fingerprint: str = ""
+    fingerprint_locked: bool = False
     username: str = ""
     password: str = ""
     first_name: str = ""
